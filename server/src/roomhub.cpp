@@ -3,6 +3,7 @@
 #include <QUuid>
 #include <QSqlQuery>
 #include <QSqlError>
+#include <QRandomGenerator>
 
 RoomHub::RoomHub(QObject* parent) : QObject(parent) {
     if (!initDatabase()) {
@@ -171,13 +172,15 @@ bool RoomHub::initDatabase() {
         return false;
     }
     
-    // 创建用户表
+    // 创建用户表 (enhanced with salt and role)
     QSqlQuery query(db_);
     QString createUsersTable = R"(
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('factory', 'expert')),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     )";
@@ -187,11 +190,20 @@ bool RoomHub::initDatabase() {
         return false;
     }
     
+    // Add role column to existing users table if it doesn't exist
+    QString alterUsersTable = "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'expert'";
+    query.exec(alterUsersTable); // Don't check error - column might already exist
+    
+    // Add salt column to existing users table if it doesn't exist  
+    QString alterUsersSaltTable = "ALTER TABLE users ADD COLUMN salt TEXT DEFAULT ''";
+    query.exec(alterUsersSaltTable); // Don't check error - column might already exist
+    
     // 创建会话表
     QString createSessionsTable = R"(
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
             username TEXT NOT NULL,
+            role TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             expires_at DATETIME NOT NULL,
             FOREIGN KEY (username) REFERENCES users (username)
@@ -203,29 +215,58 @@ bool RoomHub::initDatabase() {
         return false;
     }
     
+    // Add role column to existing sessions table if it doesn't exist
+    QString alterSessionsTable = "ALTER TABLE sessions ADD COLUMN role TEXT DEFAULT 'expert'";
+    query.exec(alterSessionsTable); // Don't check error - column might already exist
+    
     qInfo() << "Database initialized successfully";
     return true;
 }
 
-bool RoomHub::registerUser(const QString& username, const QString& password) {
-    if (username.isEmpty() || password.isEmpty()) {
+QByteArray RoomHub::generateSalt() {
+    // Generate 16 bytes of random salt
+    QByteArray salt;
+    for (int i = 0; i < 16; ++i) {
+        salt.append(static_cast<char>(QRandomGenerator::global()->bounded(256)));
+    }
+    return salt;
+}
+
+QString RoomHub::hashPassword(const QString& password, const QByteArray& salt) {
+    // Combine salt + password and hash with SHA-256
+    QByteArray data = salt + password.toUtf8();
+    QByteArray hash = QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+    return QString(hash.toHex());
+}
+
+bool RoomHub::registerUser(const QString& username, const QString& password, const QString& role) {
+    if (username.isEmpty() || password.isEmpty() || role.isEmpty()) {
         return false;
     }
     
-    // 简单的密码哈希（实际项目中应使用更安全的方法）
-    QString passwordHash = QString(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
+    // Validate role
+    if (role != "factory" && role != "expert") {
+        qWarning() << "Invalid role:" << role;
+        return false;
+    }
+    
+    // Generate salt and hash password
+    QByteArray salt = generateSalt();
+    QString passwordHash = hashPassword(password, salt);
     
     QSqlQuery query(db_);
-    query.prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)");
+    query.prepare("INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)");
     query.addBindValue(username);
     query.addBindValue(passwordHash);
+    query.addBindValue(QString(salt.toHex()));
+    query.addBindValue(role);
     
     if (!query.exec()) {
         qWarning() << "Failed to register user:" << query.lastError().text();
         return false;
     }
     
-    qInfo() << "User registered successfully:" << username;
+    qInfo() << "User registered successfully:" << username << "with role:" << role;
     return true;
 }
 
@@ -234,16 +275,35 @@ QString RoomHub::loginUser(const QString& username, const QString& password) {
         return QString();
     }
     
-    QString passwordHash = QString(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
-    
     QSqlQuery query(db_);
-    query.prepare("SELECT username FROM users WHERE username = ? AND password_hash = ?");
+    query.prepare("SELECT password_hash, salt, role FROM users WHERE username = ?");
     query.addBindValue(username);
-    query.addBindValue(passwordHash);
     
     if (!query.exec() || !query.next()) {
-        qWarning() << "Login failed for user:" << username;
+        qWarning() << "Login failed for user:" << username << "- user not found";
         return QString();
+    }
+    
+    QString storedHash = query.value(0).toString();
+    QString saltHex = query.value(1).toString();
+    QString userRole = query.value(2).toString();
+    
+    // Handle legacy users without salt
+    if (saltHex.isEmpty()) {
+        // Legacy simple SHA-256 hash
+        QString legacyHash = QString(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
+        if (storedHash != legacyHash) {
+            qWarning() << "Login failed for user:" << username << "- invalid password (legacy)";
+            return QString();
+        }
+    } else {
+        // Verify with salt+hash
+        QByteArray salt = QByteArray::fromHex(saltHex.toUtf8());
+        QString computedHash = hashPassword(password, salt);
+        if (storedHash != computedHash) {
+            qWarning() << "Login failed for user:" << username << "- invalid password";
+            return QString();
+        }
     }
     
     // 生成会话令牌
@@ -251,16 +311,17 @@ QString RoomHub::loginUser(const QString& username, const QString& password) {
     
     // 存储会话（24小时有效期）
     QSqlQuery sessionQuery(db_);
-    sessionQuery.prepare("INSERT INTO sessions (token, username, expires_at) VALUES (?, ?, datetime('now', '+24 hours'))");
+    sessionQuery.prepare("INSERT INTO sessions (token, username, role, expires_at) VALUES (?, ?, ?, datetime('now', '+24 hours'))");
     sessionQuery.addBindValue(token);
     sessionQuery.addBindValue(username);
+    sessionQuery.addBindValue(userRole);
     
     if (!sessionQuery.exec()) {
         qWarning() << "Failed to create session:" << sessionQuery.lastError().text();
         return QString();
     }
     
-    qInfo() << "User logged in successfully:" << username;
+    qInfo() << "User logged in successfully:" << username << "with role:" << userRole;
     return token;
 }
 
@@ -270,7 +331,7 @@ bool RoomHub::validateSessionToken(const QString& token) {
     }
     
     QSqlQuery query(db_);
-    query.prepare("SELECT username FROM sessions WHERE token = ? AND expires_at > datetime('now')");
+    query.prepare("SELECT username, role FROM sessions WHERE token = ? AND expires_at > datetime('now')");
     query.addBindValue(token);
     
     if (!query.exec() || !query.next()) {
@@ -278,6 +339,22 @@ bool RoomHub::validateSessionToken(const QString& token) {
     }
     
     return true;
+}
+
+QString RoomHub::getUserRole(const QString& token) {
+    if (token.isEmpty()) {
+        return QString();
+    }
+    
+    QSqlQuery query(db_);
+    query.prepare("SELECT role FROM sessions WHERE token = ? AND expires_at > datetime('now')");
+    query.addBindValue(token);
+    
+    if (!query.exec() || !query.next()) {
+        return QString();
+    }
+    
+    return query.value(0).toString();
 }
 
 QString RoomHub::generateSessionToken() {
@@ -289,14 +366,21 @@ QString RoomHub::generateSessionToken() {
 void RoomHub::handleRegister(ClientCtx* c, const Packet& p) {
     QString username = p.json.value("username").toString();
     QString password = p.json.value("password").toString();
+    QString role = p.json.value("role").toString();
     
-    if (username.isEmpty() || password.isEmpty()) {
-        QJsonObject response{{"code", 400}, {"message", "username and password required"}};
+    if (username.isEmpty() || password.isEmpty() || role.isEmpty()) {
+        QJsonObject response{{"code", 400}, {"message", "username, password and role required"}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
         return;
     }
     
-    if (registerUser(username, password)) {
+    if (role != "factory" && role != "expert") {
+        QJsonObject response{{"code", 400}, {"message", "role must be 'factory' or 'expert'"}};
+        c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
+        return;
+    }
+    
+    if (registerUser(username, password, role)) {
         QJsonObject response{{"code", 0}, {"message", "registration successful"}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
     } else {
@@ -308,6 +392,7 @@ void RoomHub::handleRegister(ClientCtx* c, const Packet& p) {
 void RoomHub::handleLogin(ClientCtx* c, const Packet& p) {
     QString username = p.json.value("username").toString();
     QString password = p.json.value("password").toString();
+    QString role = p.json.value("role").toString();
     
     if (username.isEmpty() || password.isEmpty()) {
         QJsonObject response{{"code", 400}, {"message", "username and password required"}};
@@ -317,11 +402,20 @@ void RoomHub::handleLogin(ClientCtx* c, const Packet& p) {
     
     QString token = loginUser(username, password);
     if (!token.isEmpty()) {
+        QString userRole = getUserRole(token);
+        
+        // Verify role matches if provided
+        if (!role.isEmpty() && role != userRole) {
+            QJsonObject response{{"code", 403}, {"message", "role mismatch"}};
+            c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
+            return;
+        }
+        
         c->authenticated = true;
         c->sessionToken = token;
         c->user = username;
         
-        QJsonObject response{{"code", 0}, {"message", "login successful"}, {"token", token}};
+        QJsonObject response{{"code", 0}, {"message", "login successful"}, {"token", token}, {"username", username}, {"role", userRole}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
     } else {
         QJsonObject response{{"code", 401}, {"message", "invalid username or password"}};
