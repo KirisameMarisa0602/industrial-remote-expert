@@ -1,94 +1,254 @@
 #include "protocol.h"
+#include <QDateTime>
+#include <QDataStream>
+#include <QMutexLocker>
 
-// 头字段大小常量（以便统一维护）
-static const int kLenFieldSize = 4; // uint32 length（大端）
-static const int kTypeSize     = 2; // uint16
-static const int kJsonSizeSize = 4; // uint32
+// Define logging categories
+Q_LOGGING_CATEGORY(logProtocol, "protocol")
+Q_LOGGING_CATEGORY(logNetwork, "network") 
+Q_LOGGING_CATEGORY(logRoomHub, "roomhub")
+Q_LOGGING_CATEGORY(logDevice, "device")
+Q_LOGGING_CATEGORY(logRecording, "recording")
+
+// Global sequence counter for packet ordering
+static QAtomicInt g_sequenceCounter(0);
 
 QByteArray buildPacket(quint16 type,
                        const QJsonObject& json,
-                       const QByteArray& bin)
+                       const QByteArray& bin,
+                       const QString& roomId,
+                       const QString& senderId,
+                       quint16 flags,
+                       quint32 seq)
 {
+    // Prepare JSON payload
     QByteArray jsonBytes = toJsonBytes(json);
-    quint32 jsonSize = static_cast<quint32>(jsonBytes.size());
-    quint32 length = static_cast<quint32>(kTypeSize + kJsonSizeSize + jsonSize + bin.size());
-
-    QByteArray out;
-    out.reserve(kLenFieldSize + length);
-
-    QDataStream ds(&out, QIODevice::WriteOnly);
-    ds.setByteOrder(QDataStream::BigEndian);
-
-    ds << length;   // 4B: 后续总长度（从type开始）
-    ds << type;     // 2B: 消息类型
-    ds << jsonSize; // 4B: JSON长度
-    if (!jsonBytes.isEmpty())
-        ds.writeRawData(jsonBytes.constData(), jsonBytes.size());
-    if (!bin.isEmpty())
-        ds.writeRawData(bin.constData(), bin.size());
-
-    return out;
+    if (jsonBytes.size() > static_cast<int>(MAX_JSON_SIZE)) {
+        qCWarning(logProtocol) << "JSON payload too large:" << jsonBytes.size() << "bytes";
+        return QByteArray();
+    }
+    
+    // Calculate total frame size
+    quint32 totalSize = sizeof(FrameHeader) + jsonBytes.size() + bin.size();
+    if (totalSize > MAX_FRAME_SIZE) {
+        qCWarning(logProtocol) << "Frame too large:" << totalSize << "bytes";
+        return QByteArray();
+    }
+    
+    // Create frame header
+    FrameHeader header = {};
+    header.magic = qToBigEndian(PROTOCOL_MAGIC);
+    header.version = qToBigEndian(PROTOCOL_VERSION);
+    header.msgType = qToBigEndian(type);
+    header.flags = qToBigEndian(flags);
+    header.reserved = 0;
+    header.length = qToBigEndian(totalSize);
+    header.timestampMs = qToBigEndian(static_cast<quint64>(QDateTime::currentMSecsSinceEpoch()));
+    header.seq = qToBigEndian(seq == 0 ? g_sequenceCounter.fetchAndAddOrdered(1) : seq);
+    header.jsonSize = qToBigEndian(static_cast<quint32>(jsonBytes.size()));
+    
+    // Copy room ID and sender ID (truncate if necessary)
+    QByteArray roomIdBytes = roomId.toLatin1();
+    int roomIdLen = qMin(roomIdBytes.size(), static_cast<int>(ROOM_ID_SIZE - 1));
+    memcpy(header.roomId, roomIdBytes.constData(), roomIdLen);
+    header.roomId[roomIdLen] = '\0';
+    
+    QByteArray senderIdBytes = senderId.toLatin1();
+    int senderIdLen = qMin(senderIdBytes.size(), static_cast<int>(SENDER_ID_SIZE - 1));
+    memcpy(header.senderId, senderIdBytes.constData(), senderIdLen);
+    header.senderId[senderIdLen] = '\0';
+    
+    // Build final packet
+    QByteArray packet;
+    packet.reserve(totalSize);
+    
+    // Append header
+    packet.append(reinterpret_cast<const char*>(&header), sizeof(header));
+    
+    // Append JSON payload
+    if (!jsonBytes.isEmpty()) {
+        packet.append(jsonBytes);
+    }
+    
+    // Append binary payload
+    if (!bin.isEmpty()) {
+        packet.append(bin);
+    }
+    
+    qCDebug(logProtocol) << "Built packet: type=" << type 
+                        << "size=" << totalSize
+                        << "room=" << roomId
+                        << "sender=" << senderId;
+    
+    return packet;
 }
 
-bool drainPackets(QByteArray& buffer, QVector<Packet>& out)
+bool drainPackets(QByteArray& buffer, QVector<Packet>& out, QString* error)
 {
-    bool produced = false;
-
-    for (;;) {
-        if (buffer.size() < kLenFieldSize) break; // 连长度都不够
-
-        // 读取length（大端）但不消费
-        quint32 length = 0;
-        {
-            QDataStream peek(buffer.left(kLenFieldSize));
-            peek.setByteOrder(QDataStream::BigEndian);
-            peek >> length;
+    bool producedPackets = false;
+    
+    while (buffer.size() >= static_cast<int>(sizeof(FrameHeader))) {
+        // Parse header (without consuming buffer yet)
+        FrameHeader header;
+        memcpy(&header, buffer.constData(), sizeof(header));
+        
+        // Convert from network byte order
+        header.magic = qFromBigEndian(header.magic);
+        header.version = qFromBigEndian(header.version);
+        header.msgType = qFromBigEndian(header.msgType);
+        header.flags = qFromBigEndian(header.flags);
+        header.length = qFromBigEndian(header.length);
+        header.timestampMs = qFromBigEndian(header.timestampMs);
+        header.seq = qFromBigEndian(header.seq);
+        header.jsonSize = qFromBigEndian(header.jsonSize);
+        
+        // Validate header
+        QString validationError;
+        if (!validateFrameHeader(header, &validationError)) {
+            if (error) *error = validationError;
+            qCWarning(logProtocol) << "Invalid frame header:" << validationError;
+            buffer.clear(); // Discard buffer on validation error
+            return producedPackets;
         }
-        if (length < (quint32)(kTypeSize + kJsonSizeSize)) {
-            // 异常防御：声明的长度过小
-            buffer.clear();
+        
+        // Check if we have the complete frame
+        if (buffer.size() < static_cast<int>(header.length)) {
+            // Incomplete frame, wait for more data
             break;
         }
-
-        const int totalNeed = kLenFieldSize + int(length);
-        if (buffer.size() < totalNeed) break; // 半包，等待更多数据
-
-        // 取出一个完整包块并从buffer中移除
-        QByteArray block = buffer.left(totalNeed);
-        buffer.remove(0, totalNeed);
-
-        // 解析 block
-        QDataStream ds(block);
-        ds.setByteOrder(QDataStream::BigEndian);
-
-        quint32 lenField = 0; ds >> lenField; Q_UNUSED(lenField);
-        quint16 type = 0;     ds >> type;
-        quint32 jsonSize = 0; ds >> jsonSize;
-
-        // 检查jsonSize合法性
-        const int payloadBytes = totalNeed - kLenFieldSize - kTypeSize - kJsonSizeSize;
-        if (jsonSize > (quint32)payloadBytes) {
-            // 非法，丢弃
-            continue;
+        
+        // Extract complete frame
+        QByteArray frameData = buffer.left(header.length);
+        buffer.remove(0, header.length);
+        
+        // Parse JSON payload
+        QByteArray jsonBytes;
+        if (header.jsonSize > 0) {
+            if (sizeof(FrameHeader) + header.jsonSize > header.length) {
+                if (error) *error = "JSON size exceeds frame size";
+                continue; // Skip invalid frame
+            }
+            jsonBytes = frameData.mid(sizeof(FrameHeader), header.jsonSize);
         }
-
-        QByteArray jsonBytes(jsonSize, Qt::Uninitialized);
-        if (jsonSize > 0) {
-            ds.readRawData(jsonBytes.data(), jsonBytes.size());
-        }
-        QByteArray bin;
-        const int binSize = payloadBytes - int(jsonSize);
+        
+        // Parse binary payload
+        QByteArray binData;
+        quint32 binSize = header.length - sizeof(FrameHeader) - header.jsonSize;
         if (binSize > 0) {
-            bin = block.right(binSize);
+            binData = frameData.right(binSize);
         }
-
-        Packet pkt;
-        pkt.type = type;
-        pkt.json = fromJsonBytes(jsonBytes);
-        pkt.bin  = bin;
-        out.push_back(std::move(pkt));
-        produced = true;
+        
+        // Create packet
+        Packet packet(header);
+        if (!jsonBytes.isEmpty()) {
+            packet.json = fromJsonBytes(jsonBytes);
+            if (packet.json.isEmpty() && !jsonBytes.isEmpty()) {
+                qCWarning(logProtocol) << "Failed to parse JSON payload";
+                continue; // Skip packet with invalid JSON
+            }
+        }
+        packet.bin = binData;
+        
+        out.push_back(std::move(packet));
+        producedPackets = true;
+        
+        qCDebug(logProtocol) << "Parsed packet: type=" << packet.type
+                            << "room=" << packet.roomId
+                            << "sender=" << packet.senderId;
     }
+    
+    return producedPackets;
+}
 
-    return produced;
+bool validateFrameHeader(const FrameHeader& header, QString* error)
+{
+    // Check magic number
+    if (header.magic != PROTOCOL_MAGIC) {
+        if (error) *error = QString("Invalid magic number: 0x%1").arg(header.magic, 8, 16, QChar('0'));
+        return false;
+    }
+    
+    // Check version
+    if (header.version != PROTOCOL_VERSION) {
+        if (error) *error = QString("Unsupported protocol version: %1").arg(header.version);
+        return false;
+    }
+    
+    // Check frame size
+    if (header.length < sizeof(FrameHeader) || header.length > MAX_FRAME_SIZE) {
+        if (error) *error = QString("Invalid frame size: %1").arg(header.length);
+        return false;
+    }
+    
+    // Check JSON size
+    if (header.jsonSize > MAX_JSON_SIZE) {
+        if (error) *error = QString("JSON payload too large: %1").arg(header.jsonSize);
+        return false;
+    }
+    
+    // Check that JSON size doesn't exceed frame size
+    if (sizeof(FrameHeader) + header.jsonSize > header.length) {
+        if (error) *error = "JSON size exceeds frame size";
+        return false;
+    }
+    
+    return true;
+}
+
+QString errorCodeToString(ErrorCode code)
+{
+    switch (code) {
+        case ERR_NONE: return "No error";
+        case ERR_PROTOCOL_VERSION: return "Unsupported protocol version";
+        case ERR_INVALID_FRAME: return "Malformed frame";
+        case ERR_FRAME_TOO_LARGE: return "Frame exceeds maximum size";
+        case ERR_JSON_PARSE: return "JSON parsing failed";
+        case ERR_UNAUTHORIZED: return "Authentication required";
+        case ERR_ROOM_NOT_FOUND: return "Room doesn't exist";
+        case ERR_NOT_IN_ROOM: return "User not in any room";
+        case ERR_RATE_LIMITED: return "Too many requests";
+        case ERR_INTERNAL: return "Internal server error";
+        default: return QString("Unknown error: %1").arg(static_cast<int>(code));
+    }
+}
+
+// RateLimiter implementation
+RateLimiter::RateLimiter(int maxRequests, int windowMs)
+    : maxRequests_(maxRequests), windowMs_(windowMs)
+{
+}
+
+bool RateLimiter::checkRateLimit(const QString& clientId)
+{
+    QMutexLocker locker(&mutex_);
+    
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 windowStart = now - windowMs_;
+    
+    ClientStats& stats = clients_[clientId];
+    
+    // Remove old timestamps outside the window
+    while (!stats.timestamps.isEmpty() && stats.timestamps.head() < windowStart) {
+        stats.timestamps.dequeue();
+        if (stats.requests > 0) {
+            stats.requests--;
+        }
+    }
+    
+    // Check if we're within rate limits
+    if (stats.requests >= maxRequests_) {
+        return false; // Rate limited
+    }
+    
+    // Add current request
+    stats.timestamps.enqueue(now);
+    stats.requests++;
+    
+    return true; // Request allowed
+}
+
+void RateLimiter::reset()
+{
+    QMutexLocker locker(&mutex_);
+    clients_.clear();
 }

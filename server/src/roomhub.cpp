@@ -92,7 +92,7 @@ void RoomHub::handlePacket(ClientCtx* c, const Packet& p) {
     // 简单转发（同房间广播，排除发送者）
     if (p.type == MSG_TEXT || p.type == MSG_DEVICE_DATA ||
         p.type == MSG_VIDEO_FRAME || p.type == MSG_AUDIO_FRAME ||
-        p.type == MSG_CONTROL) {
+        p.type == MSG_CONTROL_CMD) {
         // 保持原包结构，服务端不改内容
         QByteArray raw = buildPacket(p.type, p.json, p.bin);
         broadcastToRoom(c->roomId, raw, c->sock);
