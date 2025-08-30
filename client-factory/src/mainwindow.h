@@ -4,6 +4,7 @@
 #include <QMainWindow>
 #include <QCamera>      // 包含 QCamera
 #include <QVideoProbe>  // 包含 QVideoProbe
+#include <QSettings>    // 包含 QSettings for auto-start preference
 #include "clientconn.h" // 假设你的 clientconn.h 在这里
 
 // 前向声明
@@ -12,6 +13,7 @@ class QPushButton;
 class QLabel;
 class QTextEdit;
 class QVideoFrame; // 确保声明 QVideoFrame
+class QCheckBox;
 
 class MainWindow : public QMainWindow
 {
@@ -26,14 +28,20 @@ private slots:
     void onJoin();
     void onSendText();
     void onPkt(Packet p); // 假设 Packet 类型已定义
+    void onConnected();   // 处理连接建立
+    void onDisconnected(); // 处理连接断开
 
     void onToggleCamera();
     void onVideoFrame(const QVideoFrame &frame); // 接收视频帧的槽函数
+    void onAutoStartToggled(bool checked); // 处理自动启动选项切换
 
 private:
     // 这两个函数是内部实现细节，保持 private
 
     void stopCamera();
+    void tryAutoStartCamera(); // 尝试自动启动摄像头
+    void saveAutoStartPreference(bool enabled); // 保存自动启动偏好
+    bool loadAutoStartPreference(); // 加载自动启动偏好
 
     QLineEdit *edHost;
     QLineEdit *edPort;
@@ -41,13 +49,19 @@ private:
     QLineEdit *edRoom;
     QLineEdit *edInput;
     QTextEdit *txtLog;
-    QLabel *videoLabel_;
+    QLabel *videoLabel_;        // 本地视频预览
+    QLabel *remoteLabel_;       // 远端视频显示
     QPushButton *btnCamera_;
+    QCheckBox *chkAutoStart_; // 自动启动摄像头复选框
 
     ClientConn conn_; // 你的网络连接类
 
     QCamera *camera_;       // 摄像头对象
     QVideoProbe *probe_;    // 视频探头，用于捕获帧
+    QSettings settings_;    // 设置存储
+    QString currentRoom_;   // 当前加入的房间
+    bool isConnected_;      // 连接状态
+    bool isJoinedRoom_;     // 是否已加入房间
 };
 
 #endif // MAINWINDOW_H

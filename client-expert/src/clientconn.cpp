@@ -17,6 +17,11 @@ void ClientConn::send(quint16 type, const QJsonObject& json, const QByteArray& b
     sock_.write(buildPacket(type, json, bin));
 }
 
+// 检查连接状态
+bool ClientConn::isConnected() const {
+    return sock_.state() == QAbstractSocket::ConnectedState;
+}
+
 // socket已连接 -> 转发connected信号
 void ClientConn::onConnected() { emit connected(); }
 // socket断开 -> 转发disconnected信号

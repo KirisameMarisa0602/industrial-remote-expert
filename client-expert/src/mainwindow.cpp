@@ -15,6 +15,8 @@
 #include <QLabel>
 #include <QTextEdit>
 #include <QPixmap>
+#include <QCheckBox>
+#include <QMessageBox>
 
 // 假设这些宏和类在其他地方定义
 // #define MSG_JOIN_WORKORDER 100
@@ -27,6 +29,10 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , camera_(nullptr)
     , probe_(nullptr)
+    , settings_("irexp", "client-expert") // 使用指定的组织和应用名
+    , isConnected_(false)
+    , isJoinedRoom_(false)
+    , isAuthenticated_(false)
 {
     QWidget *w  = new QWidget(this);
     QVBoxLayout *lay = new QVBoxLayout(w);
@@ -42,31 +48,77 @@ MainWindow::MainWindow(QWidget *parent)
     row1->addWidget(btnConn);
     lay->addLayout(row1);
 
+    /* 登录/注册行 */
+    QHBoxLayout *loginRow = new QHBoxLayout;
+    edLoginUser = new QLineEdit();
+    edLoginUser->setPlaceholderText("Username");
+    edLoginPass = new QLineEdit();
+    edLoginPass->setPlaceholderText("Password");
+    edLoginPass->setEchoMode(QLineEdit::Password);
+    btnLogin = new QPushButton("Login");
+    btnRegister = new QPushButton("Register");
+    btnLogin->setEnabled(false);     // 连接后才能使用
+    btnRegister->setEnabled(false);  // 连接后才能使用
+    loginRow->addWidget(new QLabel("User:")); loginRow->addWidget(edLoginUser);
+    loginRow->addWidget(new QLabel("Pass:")); loginRow->addWidget(edLoginPass);
+    loginRow->addWidget(btnLogin);
+    loginRow->addWidget(btnRegister);
+    lay->addLayout(loginRow);
+
     /* 加入房间行 */
     QHBoxLayout *row2 = new QHBoxLayout;
     edUser = new QLineEdit("client-A");
     edRoom = new QLineEdit("R123");
-    QPushButton *btnJoin = new QPushButton("加入工单");
+    btnJoin_ = new QPushButton("加入工单");
+    btnJoin_->setEnabled(false);  // 认证后才能使用
     row2->addWidget(new QLabel("User:"));  row2->addWidget(edUser);
     row2->addWidget(new QLabel("Room:"));  row2->addWidget(edRoom);
-    row2->addWidget(btnJoin);
+    row2->addWidget(btnJoin_);
     lay->addLayout(row2);
 
     /* 日志 */
     txtLog = new QTextEdit; txtLog->setReadOnly(true);
     lay->addWidget(txtLog);
 
-    /* 视频区 */
-    videoLabel_ = new QLabel("等待视频");
+    /* 视频区 - 本地和远端视频并排显示 */
+    QHBoxLayout *videoRow = new QHBoxLayout;
+    
+    // 本地视频预览 (左侧)
+    QVBoxLayout *localVideoLayout = new QVBoxLayout;
+    videoLabel_ = new QLabel("本地视频预览");
     videoLabel_->setFixedSize(320, 240);
     videoLabel_->setStyleSheet("border:1px solid black;");
     videoLabel_->setAlignment(Qt::AlignCenter);
-    videoLabel_->setScaledContents(true);   // 图片自动缩放
-    lay->addWidget(videoLabel_);
+    videoLabel_->setScaledContents(true);
+    QLabel *localLabel = new QLabel("Local Preview");
+    localLabel->setAlignment(Qt::AlignCenter);
+    localVideoLayout->addWidget(localLabel);
+    localVideoLayout->addWidget(videoLabel_);
+    
+    // 远端视频显示 (右侧)
+    QVBoxLayout *remoteVideoLayout = new QVBoxLayout;
+    remoteLabel_ = new QLabel("远端视频");
+    remoteLabel_->setFixedSize(320, 240);
+    remoteLabel_->setStyleSheet("border:1px solid blue;");
+    remoteLabel_->setAlignment(Qt::AlignCenter);
+    remoteLabel_->setScaledContents(true);
+    QLabel *remoteHeaderLabel = new QLabel("Remote Video");
+    remoteHeaderLabel->setAlignment(Qt::AlignCenter);
+    remoteVideoLayout->addWidget(remoteHeaderLabel);
+    remoteVideoLayout->addWidget(remoteLabel_);
+    
+    videoRow->addLayout(localVideoLayout);
+    videoRow->addLayout(remoteVideoLayout);
+    lay->addLayout(videoRow);
 
     /* 摄像头开关 */
     btnCamera_ = new QPushButton("开启摄像头");
     lay->addWidget(btnCamera_);
+    
+    /* 自动启动摄像头选项 */
+    chkAutoStart_ = new QCheckBox("Auto start camera after join");
+    chkAutoStart_->setChecked(loadAutoStartPreference()); // 加载保存的偏好
+    lay->addWidget(chkAutoStart_);
 
     /* 发送文本 */
     QHBoxLayout *row3 = new QHBoxLayout;
@@ -79,10 +131,15 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle("Client (含视频)");
 
     connect(btnConn,   &QPushButton::clicked, this, &MainWindow::onConnect);
-    connect(btnJoin,   &QPushButton::clicked, this, &MainWindow::onJoin);
+    connect(btnLogin,  &QPushButton::clicked, this, &MainWindow::onLogin);
+    connect(btnRegister, &QPushButton::clicked, this, &MainWindow::onRegister);
+    connect(btnJoin_,   &QPushButton::clicked, this, &MainWindow::onJoin);
     connect(btnSend,   &QPushButton::clicked, this, &MainWindow::onSendText);
     connect(btnCamera_,&QPushButton::clicked,this,&MainWindow::onToggleCamera);
+    connect(chkAutoStart_, &QCheckBox::toggled, this, &MainWindow::onAutoStartToggled);
     connect(&conn_,    &ClientConn::packetArrived, this, &MainWindow::onPkt);
+    connect(&conn_,    &ClientConn::connected, this, &MainWindow::onConnected);
+    connect(&conn_,    &ClientConn::disconnected, this, &MainWindow::onDisconnected);
 }
 
 /* ---------- 网络 ---------- */
@@ -95,6 +152,7 @@ void MainWindow::onJoin()
 {
     QJsonObject j{{"roomId", edRoom->text()}, {"user", edUser->text()}};
     conn_.send(MSG_JOIN_WORKORDER, j);
+    currentRoom_ = edRoom->text(); // 记录尝试加入的房间
 }
 void MainWindow::onSendText()
 {
@@ -119,15 +177,59 @@ void MainWindow::onPkt(Packet p)
         break;
     case MSG_VIDEO_FRAME:
     {
-        QPixmap pix; pix.loadFromData(p.bin);
-        if (!pix.isNull())
-            videoLabel_->setPixmap(pix.scaled(320, 240, Qt::KeepAspectRatio));
+        QString sender = p.json["sender"].toString();
+        QString roomId = p.json["roomId"].toString();
+        
+        // 只显示来自其他用户且在当前房间的视频
+        if (sender != edUser->text() && roomId == currentRoom_ && isJoinedRoom_) {
+            QPixmap pix; 
+            pix.loadFromData(p.bin);
+            if (!pix.isNull()) {
+                remoteLabel_->setPixmap(pix.scaled(remoteLabel_->size(), Qt::KeepAspectRatio));
+            }
+        }
         break;
     }
     case MSG_SERVER_EVENT:
+    {
         txtLog->append(QString("[server] %1")
                        .arg(QString::fromUtf8(QJsonDocument(p.json).toJson())));
+        
+        int code = p.json.value("code").toInt();
+        QString message = p.json.value("message").toString();
+        
+        // 处理登录成功响应
+        if (code == 0 && message == "login successful") {
+            isAuthenticated_ = true;
+            sessionToken_ = p.json.value("token").toString();
+            btnJoin_->setEnabled(true);  // 启用房间加入按钮
+            
+            txtLog->append("Login successful! You can now join rooms.");
+        }
+        // 处理注册成功响应
+        else if (code == 0 && message == "registration successful") {
+            txtLog->append("Registration successful! You can now login.");
+        }
+        // 处理房间加入成功的响应
+        else if (code == 0 && message == "joined") {
+            isJoinedRoom_ = true;
+            txtLog->append(QString("成功加入房间: %1").arg(currentRoom_));
+            
+            // 尝试自动启动摄像头
+            tryAutoStartCamera();
+        }
+        // 处理错误响应
+        else if (code != 0) {
+            if (message.contains("authentication required")) {
+                txtLog->append("Error: Please login first before joining a room.");
+            } else if (message.contains("invalid username or password")) {
+                txtLog->append("Error: Invalid username or password.");
+            } else if (message.contains("username already exists")) {
+                txtLog->append("Error: Username already exists. Try a different name.");
+            }
+        }
         break;
+    }
     }
 }
 
@@ -139,6 +241,11 @@ void MainWindow::startCamera()
     const QList<QCameraInfo> cameras = QCameraInfo::availableCameras();
     if (cameras.isEmpty()) {
         txtLog->append("没有可用摄像头");
+        QMessageBox::information(this, "Camera Not Found", 
+            "No camera device found. Please:\n"
+            "• Install qtmultimedia and gstreamer packages\n"
+            "• If running in VM, pass through webcam device\n"
+            "• Check camera permissions");
         return;
     }
 
@@ -177,7 +284,7 @@ void MainWindow::stopCamera()
     camera_->deleteLater();
     camera_ = nullptr;
 
-    videoLabel_->setText("等待视频");
+    videoLabel_->setText("本地视频预览");
     btnCamera_->setText("开启摄像头");
     txtLog->append("摄像头已关闭");
 }
@@ -283,7 +390,7 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
     }
 
 
-    if (img.isNull() || img.byteCount() == 0) { // 检查 img 是否被有效构建
+    if (img.isNull() || img.sizeInBytes() == 0) { // 检查 img 是否被有效构建
         txtLog->append("onVideoFrame: 创建QImage失败或图像数据为空。");
         clone.unmap();
         return;
@@ -309,8 +416,116 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
     }
     buffer.close();
 
+    // 添加防护条件：只有在连接且已加入房间时才发送
+    if (!conn_.isConnected() || !isJoinedRoom_) {
+        return; // 不发送帧数据
+    }
+
     QJsonObject j{{"roomId", edRoom->text()},
                   {"sender", edUser->text()},
                   {"ts",     QDateTime::currentMSecsSinceEpoch()}};
     conn_.send(MSG_VIDEO_FRAME, j, jpeg);
+}
+
+/* ---------- 连接状态处理 ---------- */
+void MainWindow::onConnected()
+{
+    isConnected_ = true;
+    btnLogin->setEnabled(true);
+    btnRegister->setEnabled(true);
+    txtLog->append("已连接到服务器");
+}
+
+void MainWindow::onDisconnected()
+{
+    isConnected_ = false;
+    isJoinedRoom_ = false;
+    isAuthenticated_ = false;
+    currentRoom_.clear();
+    sessionToken_.clear();
+    
+    // 禁用需要连接的按钮
+    btnLogin->setEnabled(false);
+    btnRegister->setEnabled(false);
+    btnJoin_->setEnabled(false);
+    
+    txtLog->append("与服务器断开连接");
+}
+
+/* ---------- 自动启动功能 ---------- */
+void MainWindow::onAutoStartToggled(bool checked)
+{
+    saveAutoStartPreference(checked);
+}
+
+void MainWindow::tryAutoStartCamera()
+{
+    // 检查是否启用自动启动，且当前没有摄像头正在运行
+    if (!chkAutoStart_->isChecked() || camera_) {
+        return;
+    }
+    
+    // 检查是否满足启动条件：已连接且已加入房间
+    if (!isConnected_ || !isJoinedRoom_) {
+        return;
+    }
+    
+    // 尝试启动摄像头
+    const QList<QCameraInfo> cameras = QCameraInfo::availableCameras();
+    if (cameras.isEmpty()) {
+        QMessageBox::information(this, "Camera Not Found", 
+            "No camera device found. Please:\n"
+            "• Install qtmultimedia and gstreamer packages\n"
+            "• If running in VM, pass through webcam device\n"
+            "• Check camera permissions");
+        return;
+    }
+    
+    startCamera();
+}
+
+void MainWindow::saveAutoStartPreference(bool enabled)
+{
+    settings_.setValue("autoStartCamera", enabled);
+}
+
+bool MainWindow::loadAutoStartPreference()
+{
+    return settings_.value("autoStartCamera", true).toBool(); // 默认启用
+}
+
+/* ---------- 登录/注册功能 ---------- */
+void MainWindow::onLogin()
+{
+    QString username = edLoginUser->text().trimmed();
+    QString password = edLoginPass->text();
+    
+    if (username.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "Login Error", "Please enter both username and password");
+        return;
+    }
+    
+    QJsonObject loginData{{"username", username}, {"password", password}};
+    conn_.send(MSG_LOGIN, loginData);
+    txtLog->append(QString("Attempting to login as: %1").arg(username));
+}
+
+void MainWindow::onRegister()
+{
+    QString username = edLoginUser->text().trimmed();
+    QString password = edLoginPass->text();
+    
+    if (username.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "Registration Error", "Please enter both username and password");
+        return;
+    }
+    
+    if (password.length() < 4) {
+        QMessageBox::warning(this, "Registration Error", "Password must be at least 4 characters long");
+        return;
+    }
+    
+    QJsonObject registerData{{"username", username}, {"password", password}};
+    conn_.send(MSG_REGISTER, registerData);
+    txtLog->append(QString("Attempting to register user: %1").arg(username));
 }
