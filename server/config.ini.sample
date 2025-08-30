@@ -1,0 +1,40 @@
+# Industrial Remote Expert Server Configuration
+# Edit this file to customize server settings
+
+[Network]
+# Server listening address (0.0.0.0 for all interfaces)
+host=0.0.0.0
+# Server listening port
+port=5000
+
+[Database]
+# SQLite database file path (relative to server executable)
+path=server/data/app.db
+
+[Security]
+# Session token expiry time in hours
+session_expiry_hours=24
+# Maximum login attempts before temporary lockout
+max_login_attempts=5
+
+[Logging]
+# Log level: debug, info, warning, error
+level=info
+# Log file path (empty for console only)
+file=
+
+[Features]
+# Enable video conferencing
+enable_video=true
+# Enable audio support
+enable_audio=true
+# Maximum participants per room
+max_participants=10
+# Enable chat message persistence
+enable_chat_persistence=true
+
+[Performance]
+# Maximum concurrent connections
+max_connections=100
+# Message buffer size (bytes)
+buffer_size=65536
