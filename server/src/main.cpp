@@ -1,18 +1,11 @@
-#include <QtCore>
-#include <QtNetwork>
-#include "roomhub.h"
+#include <QCoreApplication>
+#include <QTextStream>
 
-int main(int argc, char** argv) {
+int main(int argc, char *argv[])
+{
     QCoreApplication app(argc, argv);
-    QCommandLineParser parser; parser.addHelpOption();
-    QCommandLineOption portOpt(QStringList() << "p" << "port", "Listen port", "port", "9000");
-    parser.addOption(portOpt);
-    parser.process(app);
 
-    quint16 port = parser.value(portOpt).toUShort();
-    RoomHub hub;
-    if (!hub.start(port)) return 1;
+    QTextStream(stdout) << "Server placeholder (Qt 5.12 compatible). Implementations will follow in subsequent commits." << Qt::endl;
 
-    qInfo() << "Usage: clients connect to server_ip:" << port;
-    return app.exec();
+    return 0;
 }
