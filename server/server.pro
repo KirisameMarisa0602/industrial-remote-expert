@@ -1,9 +1,13 @@
 TEMPLATE = app
 TARGET = server
-QT += core network sql
-CONFIG += c++11 console
+
+QT += core network websockets sql
+
+CONFIG += console c++11
 CONFIG -= app_bundle
-SOURCES += src/main.cpp \
-           src/roomhub.cpp
-HEADERS += src/roomhub.h
-include(../common/common.pri)
+
+SOURCES += \
+    src/main.cpp
+
+HEADERS += \
+
