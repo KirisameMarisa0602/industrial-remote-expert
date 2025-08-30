@@ -47,10 +47,11 @@ private:
     
     // 用户认证相关方法
     bool initDatabase();
-    bool registerUser(const QString& username, const QString& password);
+    bool registerUser(const QString& username, const QString& password, const QString& role);
     QString loginUser(const QString& username, const QString& password);
     bool validateSessionToken(const QString& token);
     QString generateSessionToken();
+    QString getUserRole(const QString& username);
     void handleRegister(ClientCtx* c, const Packet& p);
     void handleLogin(ClientCtx* c, const Packet& p);
 };
