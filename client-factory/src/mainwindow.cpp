@@ -61,13 +61,36 @@ MainWindow::MainWindow(QWidget *parent)
     txtLog = new QTextEdit; txtLog->setReadOnly(true);
     lay->addWidget(txtLog);
 
-    /* 视频区 */
-    videoLabel_ = new QLabel("等待视频");
+    /* 视频区 - 本地和远端视频并排显示 */
+    QHBoxLayout *videoRow = new QHBoxLayout;
+    
+    // 本地视频预览 (左侧)
+    QVBoxLayout *localVideoLayout = new QVBoxLayout;
+    videoLabel_ = new QLabel("本地视频预览");
     videoLabel_->setFixedSize(320, 240);
     videoLabel_->setStyleSheet("border:1px solid black;");
     videoLabel_->setAlignment(Qt::AlignCenter);
-    videoLabel_->setScaledContents(true);   // 图片自动缩放
-    lay->addWidget(videoLabel_);
+    videoLabel_->setScaledContents(true);
+    QLabel *localLabel = new QLabel("Local Preview");
+    localLabel->setAlignment(Qt::AlignCenter);
+    localVideoLayout->addWidget(localLabel);
+    localVideoLayout->addWidget(videoLabel_);
+    
+    // 远端视频显示 (右侧)
+    QVBoxLayout *remoteVideoLayout = new QVBoxLayout;
+    remoteLabel_ = new QLabel("远端视频");
+    remoteLabel_->setFixedSize(320, 240);
+    remoteLabel_->setStyleSheet("border:1px solid blue;");
+    remoteLabel_->setAlignment(Qt::AlignCenter);
+    remoteLabel_->setScaledContents(true);
+    QLabel *remoteHeaderLabel = new QLabel("Remote Video");
+    remoteHeaderLabel->setAlignment(Qt::AlignCenter);
+    remoteVideoLayout->addWidget(remoteHeaderLabel);
+    remoteVideoLayout->addWidget(remoteLabel_);
+    
+    videoRow->addLayout(localVideoLayout);
+    videoRow->addLayout(remoteVideoLayout);
+    lay->addLayout(videoRow);
 
     /* 摄像头开关 */
     btnCamera_ = new QPushButton("开启摄像头");
@@ -133,9 +156,17 @@ void MainWindow::onPkt(Packet p)
         break;
     case MSG_VIDEO_FRAME:
     {
-        QPixmap pix; pix.loadFromData(p.bin);
-        if (!pix.isNull())
-            videoLabel_->setPixmap(pix.scaled(320, 240, Qt::KeepAspectRatio));
+        QString sender = p.json["sender"].toString();
+        QString roomId = p.json["roomId"].toString();
+        
+        // 只显示来自其他用户且在当前房间的视频
+        if (sender != edUser->text() && roomId == currentRoom_ && isJoinedRoom_) {
+            QPixmap pix; 
+            pix.loadFromData(p.bin);
+            if (!pix.isNull()) {
+                remoteLabel_->setPixmap(pix.scaled(remoteLabel_->size(), Qt::KeepAspectRatio));
+            }
+        }
         break;
     }
     case MSG_SERVER_EVENT:
@@ -208,7 +239,7 @@ void MainWindow::stopCamera()
     camera_->deleteLater();
     camera_ = nullptr;
 
-    videoLabel_->setText("等待视频");
+    videoLabel_->setText("本地视频预览");
     btnCamera_->setText("开启摄像头");
     txtLog->append("摄像头已关闭");
 }
@@ -314,7 +345,7 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
     }
 
 
-    if (img.isNull() || img.byteCount() == 0) { // 检查 img 是否被有效构建
+    if (img.isNull() || img.sizeInBytes() == 0) { // 检查 img 是否被有效构建
         txtLog->append("onVideoFrame: 创建QImage失败或图像数据为空。");
         clone.unmap();
         return;

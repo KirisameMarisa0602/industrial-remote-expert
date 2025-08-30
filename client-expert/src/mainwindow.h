@@ -49,7 +49,8 @@ private:
     QLineEdit *edRoom;
     QLineEdit *edInput;
     QTextEdit *txtLog;
-    QLabel *videoLabel_;
+    QLabel *videoLabel_;        // 本地视频预览
+    QLabel *remoteLabel_;       // 远端视频显示
     QPushButton *btnCamera_;
     QCheckBox *chkAutoStart_; // 自动启动摄像头复选框
 
