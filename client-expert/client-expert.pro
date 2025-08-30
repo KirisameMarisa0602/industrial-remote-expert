@@ -12,3 +12,13 @@ include(../common/common.pri)
 QT += core gui multimedia multimediawidgets
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
+
+# Alternative modern UI target
+modern {
+    TARGET = client-expert-modern
+    SOURCES -= src/main.cpp
+    SOURCES += src/main_modern.cpp \
+               src/modernmainwindow.cpp
+    HEADERS += src/modernmainwindow.h
+    RESOURCES += resources.qrc
+}
