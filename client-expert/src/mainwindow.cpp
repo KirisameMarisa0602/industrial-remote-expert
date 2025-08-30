@@ -32,6 +32,7 @@ MainWindow::MainWindow(QWidget *parent)
     , settings_("irexp", "client-expert") // 使用指定的组织和应用名
     , isConnected_(false)
     , isJoinedRoom_(false)
+    , isAuthenticated_(false)
 {
     QWidget *w  = new QWidget(this);
     QVBoxLayout *lay = new QVBoxLayout(w);
@@ -47,14 +48,32 @@ MainWindow::MainWindow(QWidget *parent)
     row1->addWidget(btnConn);
     lay->addLayout(row1);
 
+    /* 登录/注册行 */
+    QHBoxLayout *loginRow = new QHBoxLayout;
+    edLoginUser = new QLineEdit();
+    edLoginUser->setPlaceholderText("Username");
+    edLoginPass = new QLineEdit();
+    edLoginPass->setPlaceholderText("Password");
+    edLoginPass->setEchoMode(QLineEdit::Password);
+    btnLogin = new QPushButton("Login");
+    btnRegister = new QPushButton("Register");
+    btnLogin->setEnabled(false);     // 连接后才能使用
+    btnRegister->setEnabled(false);  // 连接后才能使用
+    loginRow->addWidget(new QLabel("User:")); loginRow->addWidget(edLoginUser);
+    loginRow->addWidget(new QLabel("Pass:")); loginRow->addWidget(edLoginPass);
+    loginRow->addWidget(btnLogin);
+    loginRow->addWidget(btnRegister);
+    lay->addLayout(loginRow);
+
     /* 加入房间行 */
     QHBoxLayout *row2 = new QHBoxLayout;
     edUser = new QLineEdit("client-A");
     edRoom = new QLineEdit("R123");
-    QPushButton *btnJoin = new QPushButton("加入工单");
+    btnJoin_ = new QPushButton("加入工单");
+    btnJoin_->setEnabled(false);  // 认证后才能使用
     row2->addWidget(new QLabel("User:"));  row2->addWidget(edUser);
     row2->addWidget(new QLabel("Room:"));  row2->addWidget(edRoom);
-    row2->addWidget(btnJoin);
+    row2->addWidget(btnJoin_);
     lay->addLayout(row2);
 
     /* 日志 */
@@ -112,7 +131,9 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle("Client (含视频)");
 
     connect(btnConn,   &QPushButton::clicked, this, &MainWindow::onConnect);
-    connect(btnJoin,   &QPushButton::clicked, this, &MainWindow::onJoin);
+    connect(btnLogin,  &QPushButton::clicked, this, &MainWindow::onLogin);
+    connect(btnRegister, &QPushButton::clicked, this, &MainWindow::onRegister);
+    connect(btnJoin_,   &QPushButton::clicked, this, &MainWindow::onJoin);
     connect(btnSend,   &QPushButton::clicked, this, &MainWindow::onSendText);
     connect(btnCamera_,&QPushButton::clicked,this,&MainWindow::onToggleCamera);
     connect(chkAutoStart_, &QCheckBox::toggled, this, &MainWindow::onAutoStartToggled);
@@ -174,14 +195,38 @@ void MainWindow::onPkt(Packet p)
         txtLog->append(QString("[server] %1")
                        .arg(QString::fromUtf8(QJsonDocument(p.json).toJson())));
         
-        // 检查是否是房间加入成功的响应
-        if (p.json.contains("code") && p.json["code"].toInt() == 0 && 
-            p.json.contains("message") && p.json["message"].toString() == "joined") {
+        int code = p.json.value("code").toInt();
+        QString message = p.json.value("message").toString();
+        
+        // 处理登录成功响应
+        if (code == 0 && message == "login successful") {
+            isAuthenticated_ = true;
+            sessionToken_ = p.json.value("token").toString();
+            btnJoin_->setEnabled(true);  // 启用房间加入按钮
+            
+            txtLog->append("Login successful! You can now join rooms.");
+        }
+        // 处理注册成功响应
+        else if (code == 0 && message == "registration successful") {
+            txtLog->append("Registration successful! You can now login.");
+        }
+        // 处理房间加入成功的响应
+        else if (code == 0 && message == "joined") {
             isJoinedRoom_ = true;
             txtLog->append(QString("成功加入房间: %1").arg(currentRoom_));
             
             // 尝试自动启动摄像头
             tryAutoStartCamera();
+        }
+        // 处理错误响应
+        else if (code != 0) {
+            if (message.contains("authentication required")) {
+                txtLog->append("Error: Please login first before joining a room.");
+            } else if (message.contains("invalid username or password")) {
+                txtLog->append("Error: Invalid username or password.");
+            } else if (message.contains("username already exists")) {
+                txtLog->append("Error: Username already exists. Try a different name.");
+            }
         }
         break;
     }
@@ -386,6 +431,8 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
 void MainWindow::onConnected()
 {
     isConnected_ = true;
+    btnLogin->setEnabled(true);
+    btnRegister->setEnabled(true);
     txtLog->append("已连接到服务器");
 }
 
@@ -393,7 +440,15 @@ void MainWindow::onDisconnected()
 {
     isConnected_ = false;
     isJoinedRoom_ = false;
+    isAuthenticated_ = false;
     currentRoom_.clear();
+    sessionToken_.clear();
+    
+    // 禁用需要连接的按钮
+    btnLogin->setEnabled(false);
+    btnRegister->setEnabled(false);
+    btnJoin_->setEnabled(false);
+    
     txtLog->append("与服务器断开连接");
 }
 
@@ -437,4 +492,40 @@ void MainWindow::saveAutoStartPreference(bool enabled)
 bool MainWindow::loadAutoStartPreference()
 {
     return settings_.value("autoStartCamera", true).toBool(); // 默认启用
+}
+
+/* ---------- 登录/注册功能 ---------- */
+void MainWindow::onLogin()
+{
+    QString username = edLoginUser->text().trimmed();
+    QString password = edLoginPass->text();
+    
+    if (username.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "Login Error", "Please enter both username and password");
+        return;
+    }
+    
+    QJsonObject loginData{{"username", username}, {"password", password}};
+    conn_.send(MSG_LOGIN, loginData);
+    txtLog->append(QString("Attempting to login as: %1").arg(username));
+}
+
+void MainWindow::onRegister()
+{
+    QString username = edLoginUser->text().trimmed();
+    QString password = edLoginPass->text();
+    
+    if (username.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "Registration Error", "Please enter both username and password");
+        return;
+    }
+    
+    if (password.length() < 4) {
+        QMessageBox::warning(this, "Registration Error", "Password must be at least 4 characters long");
+        return;
+    }
+    
+    QJsonObject registerData{{"username", username}, {"password", password}};
+    conn_.send(MSG_REGISTER, registerData);
+    txtLog->append(QString("Attempting to register user: %1").arg(username));
 }

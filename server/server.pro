@@ -1,6 +1,6 @@
 TEMPLATE = app
 TARGET = server
-QT += core network
+QT += core network sql
 CONFIG += c++11 console
 CONFIG -= app_bundle
 SOURCES += src/main.cpp \

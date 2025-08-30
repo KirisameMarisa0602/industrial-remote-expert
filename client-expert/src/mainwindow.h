@@ -30,6 +30,9 @@ private slots:
     void onPkt(Packet p); // 假设 Packet 类型已定义
     void onConnected();   // 处理连接建立
     void onDisconnected(); // 处理连接断开
+    
+    void onLogin();       // 处理登录
+    void onRegister();    // 处理注册
 
     void onToggleCamera();
     void onVideoFrame(const QVideoFrame &frame); // 接收视频帧的槽函数
@@ -53,6 +56,13 @@ private:
     QLabel *remoteLabel_;       // 远端视频显示
     QPushButton *btnCamera_;
     QCheckBox *chkAutoStart_; // 自动启动摄像头复选框
+    
+    // 登录/注册UI
+    QLineEdit *edLoginUser;     // 登录用户名
+    QLineEdit *edLoginPass;     // 登录密码
+    QPushButton *btnLogin;      // 登录按钮
+    QPushButton *btnRegister;   // 注册按钮
+    QPushButton *btnJoin_;      // 加入房间按钮
 
     ClientConn conn_; // 你的网络连接类
 
@@ -62,6 +72,8 @@ private:
     QString currentRoom_;   // 当前加入的房间
     bool isConnected_;      // 连接状态
     bool isJoinedRoom_;     // 是否已加入房间
+    bool isAuthenticated_;  // 是否已认证
+    QString sessionToken_;  // 会话令牌
 };
 
 #endif // MAINWINDOW_H
