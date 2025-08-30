@@ -12,9 +12,18 @@ void ClientConn::connectTo(const QString& host, quint16 port) {
     sock_.connectToHost(host, port);
 }
 
+// Alternative connect method name
+void ClientConn::connect2(const QString& host, quint16 port) {
+    connectTo(host, port);
+}
+
 // 发送协议包：封包为 [type|len|json|bin] 写入socket
 void ClientConn::send(quint16 type, const QJsonObject& json, const QByteArray& bin) {
-    sock_.write(buildPacket(type, json, bin));
+    QJsonObject jsonWithAuth = json;
+    if (!sessionToken_.isEmpty()) {
+        jsonWithAuth["sessionToken"] = sessionToken_;
+    }
+    sock_.write(buildPacket(type, jsonWithAuth, bin));
 }
 
 // 检查连接状态
@@ -22,16 +31,36 @@ bool ClientConn::isConnected() const {
     return sock_.state() == QAbstractSocket::ConnectedState;
 }
 
+// Set session token for authenticated requests
+void ClientConn::setSessionToken(const QString& token) {
+    sessionToken_ = token;
+}
+
+// Get current session token
+QString ClientConn::sessionToken() const {
+    return sessionToken_;
+}
+
 // socket已连接 -> 转发connected信号
-void ClientConn::onConnected() { emit connected(); }
+void ClientConn::onConnected() { 
+    emit connected(); 
+    emit sigConnected();
+}
+
 // socket断开 -> 转发disconnected信号
-void ClientConn::onDisconnected() { emit disconnected(); }
+void ClientConn::onDisconnected() { 
+    emit disconnected(); 
+    emit sigDisconnected();
+}
 
 // 收到数据 -> 累加到缓冲并尽可能解析成Packet，逐个发出
 void ClientConn::onReadyRead() {
     buf_.append(sock_.readAll());
     QVector<Packet> pkts;
     if (drainPackets(buf_, pkts)) {
-        for (auto& p : pkts) emit packetArrived(p);
+        for (auto& p : pkts) {
+            emit packetArrived(p);
+            emit sigPkt(p);
+        }
     }
 }
