@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QTextStream>
 #include "mainwindow.h"
+#include "factorymainwindow.h"
 #include "logindialog.h"
 
 int main(int argc, char** argv) {
@@ -23,11 +24,21 @@ int main(int argc, char** argv) {
     
     LoginDialog::LoginResult result = loginDialog.getResult();
     
-    MainWindow w;
-    w.setWindowTitle(QString("Industrial Remote Expert - %1 (%2)").arg(
-        result.role == "factory" ? "工厂端" : "专家端", result.username));
-    w.resize(720, 480);
-    w.show();
-    w.startCamera();
-    return app.exec();
+    QMainWindow* window = nullptr;
+    
+    // Route based on role
+    if (result.role == "factory") {
+        window = new FactoryMainWindow(result.username, result.role);
+    } else {
+        // For this client, even experts will use the old interface for now
+        // In a real system, you might redirect to expert client
+        window = new FactoryMainWindow(result.username, result.role);
+    }
+    
+    window->resize(1200, 800);
+    window->show();
+    
+    int exitCode = app.exec();
+    delete window;
+    return exitCode;
 }
