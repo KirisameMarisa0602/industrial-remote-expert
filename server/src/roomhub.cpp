@@ -163,27 +163,88 @@ void RoomHub::broadcastToRoom(const QString& roomId, const QByteArray& packet, Q
 /* ---------- 用户认证系统 ---------- */
 
 bool RoomHub::initDatabase() {
+    // Create data directory if it doesn't exist
+    QDir().mkpath("data");
+    
     db_ = QSqlDatabase::addDatabase("QSQLITE");
-    db_.setDatabaseName("industrial_remote_expert.db");
+    db_.setDatabaseName("data/app.db");
     
     if (!db_.open()) {
         qCritical() << "Cannot open database:" << db_.lastError().text();
         return false;
     }
     
-    // 创建用户表
     QSqlQuery query(db_);
+    
+    // 创建用户表 - 增强版包含角色和salt
     QString createUsersTable = R"(
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
+            salt BLOB NOT NULL,
+            passhash BLOB NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('工厂', '专家')),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     )";
     
     if (!query.exec(createUsersTable)) {
         qCritical() << "Failed to create users table:" << query.lastError().text();
+        return false;
+    }
+    
+    // 创建工单表
+    QString createTicketsTable = R"(
+        CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'in_progress', 'closed')),
+            created_by INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (created_by) REFERENCES users (id)
+        )
+    )";
+    
+    if (!query.exec(createTicketsTable)) {
+        qCritical() << "Failed to create tickets table:" << query.lastError().text();
+        return false;
+    }
+    
+    // 创建工单参与者表
+    QString createTicketParticipantsTable = R"(
+        CREATE TABLE IF NOT EXISTS ticket_participants (
+            ticket_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ticket_id, user_id),
+            FOREIGN KEY (ticket_id) REFERENCES tickets (id),
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    )";
+    
+    if (!query.exec(createTicketParticipantsTable)) {
+        qCritical() << "Failed to create ticket_participants table:" << query.lastError().text();
+        return false;
+    }
+    
+    // 创建消息表
+    QString createMessagesTable = R"(
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('text', 'video', 'audio', 'system')),
+            content BLOB,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (ticket_id) REFERENCES tickets (id),
+            FOREIGN KEY (sender_id) REFERENCES users (id)
+        )
+    )";
+    
+    if (!query.exec(createMessagesTable)) {
+        qCritical() << "Failed to create messages table:" << query.lastError().text();
         return false;
     }
     
@@ -207,25 +268,39 @@ bool RoomHub::initDatabase() {
     return true;
 }
 
-bool RoomHub::registerUser(const QString& username, const QString& password) {
-    if (username.isEmpty() || password.isEmpty()) {
+bool RoomHub::registerUser(const QString& username, const QString& password, const QString& role) {
+    if (username.isEmpty() || password.isEmpty() || role.isEmpty()) {
         return false;
     }
     
-    // 简单的密码哈希（实际项目中应使用更安全的方法）
-    QString passwordHash = QString(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
+    if (role != "工厂" && role != "专家") {
+        qWarning() << "Invalid role:" << role;
+        return false;
+    }
+    
+    // 生成随机salt（16字节）
+    QByteArray salt(16, 0);
+    for (int i = 0; i < 16; ++i) {
+        salt[i] = static_cast<char>(QRandomGenerator::global()->bounded(256));
+    }
+    
+    // 使用salt进行密码哈希
+    QByteArray saltedPassword = password.toUtf8() + salt;
+    QByteArray passwordHash = QCryptographicHash::hash(saltedPassword, QCryptographicHash::Sha256);
     
     QSqlQuery query(db_);
-    query.prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)");
+    query.prepare("INSERT INTO users (username, salt, passhash, role) VALUES (?, ?, ?, ?)");
     query.addBindValue(username);
+    query.addBindValue(salt);
     query.addBindValue(passwordHash);
+    query.addBindValue(role);
     
     if (!query.exec()) {
         qWarning() << "Failed to register user:" << query.lastError().text();
         return false;
     }
     
-    qInfo() << "User registered successfully:" << username;
+    qInfo() << "User registered successfully:" << username << "with role:" << role;
     return true;
 }
 
@@ -234,15 +309,25 @@ QString RoomHub::loginUser(const QString& username, const QString& password) {
         return QString();
     }
     
-    QString passwordHash = QString(QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
-    
     QSqlQuery query(db_);
-    query.prepare("SELECT username FROM users WHERE username = ? AND password_hash = ?");
+    query.prepare("SELECT salt, passhash, role FROM users WHERE username = ?");
     query.addBindValue(username);
-    query.addBindValue(passwordHash);
     
     if (!query.exec() || !query.next()) {
-        qWarning() << "Login failed for user:" << username;
+        qWarning() << "User not found:" << username;
+        return QString();
+    }
+    
+    QByteArray storedSalt = query.value(0).toByteArray();
+    QByteArray storedHash = query.value(1).toByteArray();
+    QString userRole = query.value(2).toString();
+    
+    // 验证密码
+    QByteArray saltedPassword = password.toUtf8() + storedSalt;
+    QByteArray passwordHash = QCryptographicHash::hash(saltedPassword, QCryptographicHash::Sha256);
+    
+    if (passwordHash != storedHash) {
+        qWarning() << "Invalid password for user:" << username;
         return QString();
     }
     
@@ -260,7 +345,7 @@ QString RoomHub::loginUser(const QString& username, const QString& password) {
         return QString();
     }
     
-    qInfo() << "User logged in successfully:" << username;
+    qInfo() << "User logged in successfully:" << username << "with role:" << userRole;
     return token;
 }
 
@@ -289,14 +374,21 @@ QString RoomHub::generateSessionToken() {
 void RoomHub::handleRegister(ClientCtx* c, const Packet& p) {
     QString username = p.json.value("username").toString();
     QString password = p.json.value("password").toString();
+    QString role = p.json.value("role").toString();
     
-    if (username.isEmpty() || password.isEmpty()) {
-        QJsonObject response{{"code", 400}, {"message", "username and password required"}};
+    if (username.isEmpty() || password.isEmpty() || role.isEmpty()) {
+        QJsonObject response{{"code", 400}, {"message", "username, password and role required"}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
         return;
     }
     
-    if (registerUser(username, password)) {
+    if (role != "工厂" && role != "专家") {
+        QJsonObject response{{"code", 400}, {"message", "invalid role, must be '工厂' or '专家'"}};
+        c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
+        return;
+    }
+    
+    if (registerUser(username, password, role)) {
         QJsonObject response{{"code", 0}, {"message", "registration successful"}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
     } else {
@@ -317,11 +409,20 @@ void RoomHub::handleLogin(ClientCtx* c, const Packet& p) {
     
     QString token = loginUser(username, password);
     if (!token.isEmpty()) {
+        // Get user role for response
+        QSqlQuery query(db_);
+        query.prepare("SELECT role FROM users WHERE username = ?");
+        query.addBindValue(username);
+        QString userRole;
+        if (query.exec() && query.next()) {
+            userRole = query.value(0).toString();
+        }
+        
         c->authenticated = true;
         c->sessionToken = token;
         c->user = username;
         
-        QJsonObject response{{"code", 0}, {"message", "login successful"}, {"token", token}};
+        QJsonObject response{{"code", 0}, {"message", "login successful"}, {"token", token}, {"role", userRole}};
         c->sock->write(buildPacket(MSG_SERVER_EVENT, response));
     } else {
         QJsonObject response{{"code", 401}, {"message", "invalid username or password"}};
