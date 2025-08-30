@@ -2,18 +2,24 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QCamera>      // 包含 QCamera
-#include <QVideoProbe>  // 包含 QVideoProbe
-#include <QSettings>    // 包含 QSettings for auto-start preference
-#include "clientconn.h" // 假设你的 clientconn.h 在这里
+#include <QCamera>
+#include <QVideoProbe>
+#include <QSettings>
+#include "clientconn.h"
+#include "loginregisterdialog.h"
 
-// 前向声明
+// Forward declarations
 class QLineEdit;
 class QPushButton;
 class QLabel;
 class QTextEdit;
-class QVideoFrame; // 确保声明 QVideoFrame
+class QVideoFrame;
 class QCheckBox;
+class QListWidget;
+class QDockWidget;
+class QSplitter;
+class QTreeWidget;
+class QTabWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -27,53 +33,78 @@ private slots:
     void onConnect();
     void onJoin();
     void onSendText();
-    void onPkt(Packet p); // 假设 Packet 类型已定义
-    void onConnected();   // 处理连接建立
-    void onDisconnected(); // 处理连接断开
+    void onPkt(Packet p);
+    void onConnected();
+    void onDisconnected();
     
-    void onLogin();       // 处理登录
-    void onRegister();    // 处理注册
-
+    // Authentication (using new dialog)
+    void onLoginSuccess(const QString& username, const QString& password, UserRole role);
+    void onRegisterSuccess(const QString& username, const QString& password, UserRole role);
+    
     void onToggleCamera();
-    void onVideoFrame(const QVideoFrame &frame); // 接收视频帧的槽函数
-    void onAutoStartToggled(bool checked); // 处理自动启动选项切换
+    void onVideoFrame(const QVideoFrame &frame);
+    void onAutoStartToggled(bool checked);
 
 private:
-    // 这两个函数是内部实现细节，保持 private
-
+    void setupExpertMainUI();
+    void createMenuBar();
+    void createNavigationPanel();
+    void createVideoGrid();
+    void createParticipantPanel();
+    void createChatPanel();
+    void showLoginDialog();
+    
     void stopCamera();
-    void tryAutoStartCamera(); // 尝试自动启动摄像头
-    void saveAutoStartPreference(bool enabled); // 保存自动启动偏好
-    bool loadAutoStartPreference(); // 加载自动启动偏好
+    void tryAutoStartCamera();
+    void saveAutoStartPreference(bool enabled);
+    bool loadAutoStartPreference();
 
+    // Legacy UI components (will be removed/replaced)
     QLineEdit *edHost;
     QLineEdit *edPort;
     QLineEdit *edUser;
     QLineEdit *edRoom;
     QLineEdit *edInput;
     QTextEdit *txtLog;
-    QLabel *videoLabel_;        // 本地视频预览
-    QLabel *remoteLabel_;       // 远端视频显示
-    QPushButton *btnCamera_;
-    QCheckBox *chkAutoStart_; // 自动启动摄像头复选框
     
-    // 登录/注册UI
-    QLineEdit *edLoginUser;     // 登录用户名
-    QLineEdit *edLoginPass;     // 登录密码
-    QPushButton *btnLogin;      // 登录按钮
-    QPushButton *btnRegister;   // 注册按钮
-    QPushButton *btnJoin_;      // 加入房间按钮
+    // Video components
+    QLabel *videoLabel_;
+    QLabel *remoteLabel_;
+    QPushButton *btnCamera_;
+    QCheckBox *chkAutoStart_;
+    
+    // Modern Expert UI components
+    QDockWidget *navigationDock_;
+    QDockWidget *participantDock_;
+    QDockWidget *chatDock_;
+    QTreeWidget *workOrderList_;
+    QListWidget *participantList_;
+    QWidget *videoGrid_;
+    QTabWidget *chatTabs_;
+    QTextEdit *chatDisplay_;
+    QLineEdit *chatInput_;
+    QPushButton *joinButton_;
+    
+    // Login/authentication
+    QLineEdit *edLoginUser;
+    QLineEdit *edLoginPass;
+    QPushButton *btnLogin;
+    QPushButton *btnRegister;
+    QPushButton *btnJoin_;
+    
+    UserRole currentUserRole_;
+    QString authenticatedUsername_;
 
-    ClientConn conn_; // 你的网络连接类
+    ClientConn conn_;
 
-    QCamera *camera_;       // 摄像头对象
-    QVideoProbe *probe_;    // 视频探头，用于捕获帧
-    QSettings settings_;    // 设置存储
-    QString currentRoom_;   // 当前加入的房间
-    bool isConnected_;      // 连接状态
-    bool isJoinedRoom_;     // 是否已加入房间
-    bool isAuthenticated_;  // 是否已认证
-    QString sessionToken_;  // 会话令牌
+    QCamera *camera_;
+    QVideoProbe *probe_;
+    QSettings settings_;
+    QString currentRoom_;
+    bool isConnected_;
+    bool isJoinedRoom_;
+    bool isAuthenticated_;
+    QString sessionToken_;
 };
 
 #endif // MAINWINDOW_H
