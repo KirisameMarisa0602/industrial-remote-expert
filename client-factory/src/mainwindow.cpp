@@ -15,6 +15,8 @@
 #include <QLabel>
 #include <QTextEdit>
 #include <QPixmap>
+#include <QCheckBox>
+#include <QMessageBox>
 
 // 假设这些宏和类在其他地方定义
 // #define MSG_JOIN_WORKORDER 100
@@ -27,6 +29,9 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , camera_(nullptr)
     , probe_(nullptr)
+    , settings_("irexp", "client-factory") // 使用指定的组织和应用名
+    , isConnected_(false)
+    , isJoinedRoom_(false)
 {
     QWidget *w  = new QWidget(this);
     QVBoxLayout *lay = new QVBoxLayout(w);
@@ -67,6 +72,11 @@ MainWindow::MainWindow(QWidget *parent)
     /* 摄像头开关 */
     btnCamera_ = new QPushButton("开启摄像头");
     lay->addWidget(btnCamera_);
+    
+    /* 自动启动摄像头选项 */
+    chkAutoStart_ = new QCheckBox("Auto start camera after join");
+    chkAutoStart_->setChecked(loadAutoStartPreference()); // 加载保存的偏好
+    lay->addWidget(chkAutoStart_);
 
     /* 发送文本 */
     QHBoxLayout *row3 = new QHBoxLayout;
@@ -82,7 +92,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(btnJoin,   &QPushButton::clicked, this, &MainWindow::onJoin);
     connect(btnSend,   &QPushButton::clicked, this, &MainWindow::onSendText);
     connect(btnCamera_,&QPushButton::clicked,this,&MainWindow::onToggleCamera);
+    connect(chkAutoStart_, &QCheckBox::toggled, this, &MainWindow::onAutoStartToggled);
     connect(&conn_,    &ClientConn::packetArrived, this, &MainWindow::onPkt);
+    connect(&conn_,    &ClientConn::connected, this, &MainWindow::onConnected);
+    connect(&conn_,    &ClientConn::disconnected, this, &MainWindow::onDisconnected);
 }
 
 /* ---------- 网络 ---------- */
@@ -95,6 +108,7 @@ void MainWindow::onJoin()
 {
     QJsonObject j{{"roomId", edRoom->text()}, {"user", edUser->text()}};
     conn_.send(MSG_JOIN_WORKORDER, j);
+    currentRoom_ = edRoom->text(); // 记录尝试加入的房间
 }
 void MainWindow::onSendText()
 {
@@ -125,9 +139,21 @@ void MainWindow::onPkt(Packet p)
         break;
     }
     case MSG_SERVER_EVENT:
+    {
         txtLog->append(QString("[server] %1")
                        .arg(QString::fromUtf8(QJsonDocument(p.json).toJson())));
+        
+        // 检查是否是房间加入成功的响应
+        if (p.json.contains("code") && p.json["code"].toInt() == 0 && 
+            p.json.contains("message") && p.json["message"].toString() == "joined") {
+            isJoinedRoom_ = true;
+            txtLog->append(QString("成功加入房间: %1").arg(currentRoom_));
+            
+            // 尝试自动启动摄像头
+            tryAutoStartCamera();
+        }
         break;
+    }
     }
 }
 
@@ -139,6 +165,11 @@ void MainWindow::startCamera()
     const QList<QCameraInfo> cameras = QCameraInfo::availableCameras();
     if (cameras.isEmpty()) {
         txtLog->append("没有可用摄像头");
+        QMessageBox::information(this, "Camera Not Found", 
+            "No camera device found. Please:\n"
+            "• Install qtmultimedia and gstreamer packages\n"
+            "• If running in VM, pass through webcam device\n"
+            "• Check camera permissions");
         return;
     }
 
@@ -309,8 +340,70 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
     }
     buffer.close();
 
+    // 添加防护条件：只有在连接且已加入房间时才发送
+    if (!conn_.isConnected() || !isJoinedRoom_) {
+        return; // 不发送帧数据
+    }
+
     QJsonObject j{{"roomId", edRoom->text()},
                   {"sender", edUser->text()},
                   {"ts",     QDateTime::currentMSecsSinceEpoch()}};
     conn_.send(MSG_VIDEO_FRAME, j, jpeg);
+}
+
+/* ---------- 连接状态处理 ---------- */
+void MainWindow::onConnected()
+{
+    isConnected_ = true;
+    txtLog->append("已连接到服务器");
+}
+
+void MainWindow::onDisconnected()
+{
+    isConnected_ = false;
+    isJoinedRoom_ = false;
+    currentRoom_.clear();
+    txtLog->append("与服务器断开连接");
+}
+
+/* ---------- 自动启动功能 ---------- */
+void MainWindow::onAutoStartToggled(bool checked)
+{
+    saveAutoStartPreference(checked);
+}
+
+void MainWindow::tryAutoStartCamera()
+{
+    // 检查是否启用自动启动，且当前没有摄像头正在运行
+    if (!chkAutoStart_->isChecked() || camera_) {
+        return;
+    }
+    
+    // 检查是否满足启动条件：已连接且已加入房间
+    if (!isConnected_ || !isJoinedRoom_) {
+        return;
+    }
+    
+    // 尝试启动摄像头
+    const QList<QCameraInfo> cameras = QCameraInfo::availableCameras();
+    if (cameras.isEmpty()) {
+        QMessageBox::information(this, "Camera Not Found", 
+            "No camera device found. Please:\n"
+            "• Install qtmultimedia and gstreamer packages\n"
+            "• If running in VM, pass through webcam device\n"
+            "• Check camera permissions");
+        return;
+    }
+    
+    startCamera();
+}
+
+void MainWindow::saveAutoStartPreference(bool enabled)
+{
+    settings_.setValue("autoStartCamera", enabled);
+}
+
+bool MainWindow::loadAutoStartPreference()
+{
+    return settings_.value("autoStartCamera", true).toBool(); // 默认启用
 }
