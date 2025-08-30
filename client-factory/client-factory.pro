@@ -1,6 +1,6 @@
 TEMPLATE = app
 TARGET = client-factory
-QT += core gui widgets network
+QT += core gui widgets network serialport charts
 CONFIG += c++11
 SOURCES += src/main.cpp \
            src/mainwindow.cpp \
