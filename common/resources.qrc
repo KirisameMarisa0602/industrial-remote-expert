@@ -1,0 +1,16 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/styles">
+        <file>styles/theme-dark.qss</file>
+    </qresource>
+    <qresource prefix="/icons">
+        <file>icons/add.svg</file>
+        <file>icons/video.svg</file>
+        <file>icons/mic.svg</file>
+        <file>icons/check.svg</file>
+        <file>icons/chat.svg</file>
+        <file>icons/dashboard.svg</file>
+        <file>icons/tickets.svg</file>
+        <file>icons/logout.svg</file>
+    </qresource>
+</RCC>

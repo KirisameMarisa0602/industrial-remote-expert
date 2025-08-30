@@ -12,6 +12,7 @@
 struct ClientCtx {
     QTcpSocket* sock = nullptr;
     QString user;       // 用户名，仅用于日志/展示
+    QString role;       // 用户角色：factory/expert
     QString roomId;     // 当前加入的房间；空字符串表示未加入任何房间
     QString sessionToken; // 登录会话令牌
     bool authenticated = false; // 是否已认证

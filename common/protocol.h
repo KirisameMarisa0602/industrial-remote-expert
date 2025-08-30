@@ -40,14 +40,20 @@ enum FrameFlags : quint16 {
 // Enhanced message types with proper categorization and backward compatibility
 enum MsgType : quint16 {
     // Authentication and session management (1-19)
-    MSG_REGISTER         = 1,   // User registration
+    MSG_REGISTER         = 1,   // User registration with role
     MSG_LOGIN            = 2,   // User login
     MSG_LOGOUT           = 3,   // User logout
-    MSG_CREATE_WORKORDER = 4,   // Create work order
-    MSG_JOIN_WORKORDER   = 4,   // Join work order (room) - KEEPING OLD VALUE FOR COMPATIBILITY
-    MSG_LEAVE_WORKORDER  = 6,   // Leave work order (room)
+    MSG_AUTH_RESULT      = 5,   // Authentication result (success/failure)
+    
+    // Ticket/Work order management (6-19)
+    MSG_TICKET_CREATE    = 6,   // Create new ticket
+    MSG_TICKET_LIST      = 7,   // List available tickets
+    MSG_TICKET_JOIN      = 8,   // Join ticket (replaces MSG_JOIN_WORKORDER)
+    MSG_TICKET_LEAVE     = 9,   // Leave ticket
+    MSG_TICKET_CLOSE     = 11,  // Close ticket
+    MSG_JOIN_WORKORDER   = 8,   // Legacy compatibility with MSG_TICKET_JOIN
 
-    // Communication (10-19) - keeping old numbers for compatibility
+    // Communication (10, 15-19) - keeping old numbers for compatibility
     MSG_TEXT             = 10,  // Text message - KEEPING OLD VALUE FOR COMPATIBILITY
     
     // Device and control (20-39)  

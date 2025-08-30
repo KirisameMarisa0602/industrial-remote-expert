@@ -1,6 +1,6 @@
 TEMPLATE = app
 TARGET = client-expert
-QT += core gui widgets network
+QT += core gui widgets network multimedia multimediawidgets sql charts svg
 CONFIG += c++11
 SOURCES += src/main.cpp \
            src/mainwindow.cpp \
@@ -9,6 +9,5 @@ HEADERS += src/mainwindow.h \
            src/clientconn.h
 FORMS   +=
 include(../common/common.pri)
-QT += core gui multimedia multimediawidgets
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
