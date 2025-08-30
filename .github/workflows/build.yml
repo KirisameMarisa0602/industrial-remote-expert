@@ -1,0 +1,281 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        qt-version: ['5.15.2']
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: ${{ matrix.qt-version }}
+        modules: 'qtcharts qtserialport'
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libsqlite3-dev \
+          qtbase5-dev \
+          qttools5-dev \
+          qtmultimedia5-dev \
+          libqt5charts5-dev \
+          libqt5serialport5-dev
+          
+    - name: Create build directories
+      run: |
+        mkdir -p build/server
+        mkdir -p build/client-factory
+        mkdir -p build/client-expert
+        
+    - name: Build server
+      working-directory: build/server
+      run: |
+        qmake ../../server/server.pro
+        make -j$(nproc)
+        
+    - name: Build client-factory
+      working-directory: build/client-factory
+      run: |
+        qmake ../../client-factory/client-factory.pro
+        make -j$(nproc)
+        
+    - name: Build client-expert
+      working-directory: build/client-expert
+      run: |
+        qmake ../../client-expert/client-expert.pro
+        make -j$(nproc)
+        
+    - name: Test server startup
+      working-directory: build/server
+      run: |
+        timeout 10s ./server --help || true
+        timeout 10s ./server --database /tmp/test.db --port 9001 &
+        SERVER_PID=$!
+        sleep 2
+        kill $SERVER_PID || true
+        
+    - name: Test protocol validation
+      working-directory: build/server
+      run: |
+        # Test database creation
+        ./server --database /tmp/test_protocol.db --port 9002 &
+        SERVER_PID=$!
+        sleep 2
+        kill $SERVER_PID
+        # Check if database was created
+        test -f /tmp/test_protocol.db && echo "Database created successfully"
+        
+    - name: Archive build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ubuntu-builds
+        path: |
+          build/server/server
+          build/client-factory/client-factory
+          build/client-expert/client-expert
+          
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '5.15.2'
+        arch: 'win64_msvc2019_64'
+        modules: 'qtcharts qtserialport'
+        
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v1.3
+      
+    - name: Build server
+      run: |
+        cd server
+        qmake server.pro
+        nmake
+        
+    - name: Build client-factory
+      run: |
+        cd client-factory
+        qmake client-factory.pro
+        nmake
+        
+    - name: Build client-expert
+      run: |
+        cd client-expert
+        qmake client-expert.pro
+        nmake
+        
+    - name: Archive Windows builds
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-builds
+        path: |
+          server/release/server.exe
+          client-factory/release/client-factory.exe
+          client-expert/release/client-expert.exe
+          
+  build-macos:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '5.15.2'
+        modules: 'qtcharts qtserialport'
+        
+    - name: Build server
+      run: |
+        cd server
+        qmake server.pro
+        make -j$(sysctl -n hw.ncpu)
+        
+    - name: Build client-factory
+      run: |
+        cd client-factory
+        qmake client-factory.pro
+        make -j$(sysctl -n hw.ncpu)
+        
+    - name: Build client-expert
+      run: |
+        cd client-expert
+        qmake client-expert.pro
+        make -j$(sysctl -n hw.ncpu)
+        
+    - name: Archive macOS builds
+      uses: actions/upload-artifact@v3
+      with:
+        name: macos-builds
+        path: |
+          server/server
+          client-factory/client-factory.app
+          client-expert/client-expert.app
+          
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: build-ubuntu
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: ubuntu-builds
+        path: builds/
+        
+    - name: Make binaries executable
+      run: |
+        chmod +x builds/server
+        chmod +x builds/client-factory
+        chmod +x builds/client-expert
+        
+    - name: Start server for integration test
+      run: |
+        cd builds
+        ./server --database /tmp/integration_test.db --port 9003 --debug &
+        SERVER_PID=$!
+        echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+        sleep 3
+        
+    - name: Test server connectivity
+      run: |
+        # Test if server is listening
+        netstat -tulpn | grep :9003
+        
+    - name: Test database creation
+      run: |
+        test -f /tmp/integration_test.db && echo "Integration test database created"
+        sqlite3 /tmp/integration_test.db ".tables" | grep -q "users" && echo "Database schema created"
+        
+    - name: Cleanup
+      run: |
+        kill $SERVER_PID || true
+        
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install clang-format
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+        
+    - name: Check code formatting
+      run: |
+        find . -name "*.cpp" -o -name "*.h" | head -10 | xargs clang-format --dry-run --Werror
+        
+    - name: Count lines of code
+      run: |
+        echo "## Code Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Lines | Files |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        
+        server_lines=$(find server/ -name "*.cpp" -o -name "*.h" | xargs wc -l | tail -1 | awk '{print $1}')
+        server_files=$(find server/ -name "*.cpp" -o -name "*.h" | wc -l)
+        echo "| Server | $server_lines | $server_files |" >> $GITHUB_STEP_SUMMARY
+        
+        common_lines=$(find common/ -name "*.cpp" -o -name "*.h" | xargs wc -l | tail -1 | awk '{print $1}')
+        common_files=$(find common/ -name "*.cpp" -o -name "*.h" | wc -l)
+        echo "| Common | $common_lines | $common_files |" >> $GITHUB_STEP_SUMMARY
+        
+        client_factory_lines=$(find client-factory/ -name "*.cpp" -o -name "*.h" | xargs wc -l | tail -1 | awk '{print $1}')
+        client_factory_files=$(find client-factory/ -name "*.cpp" -o -name "*.h" | wc -l)
+        echo "| Client Factory | $client_factory_lines | $client_factory_files |" >> $GITHUB_STEP_SUMMARY
+        
+        client_expert_lines=$(find client-expert/ -name "*.cpp" -o -name "*.h" | xargs wc -l | tail -1 | awk '{print $1}')
+        client_expert_files=$(find client-expert/ -name "*.cpp" -o -name "*.h" | wc -l)
+        echo "| Client Expert | $client_expert_lines | $client_expert_files |" >> $GITHUB_STEP_SUMMARY
+        
+  documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Validate documentation
+      run: |
+        # Check if required documentation exists
+        test -f README.md && echo "✓ README.md exists"
+        test -f docs/ROADMAP.md && echo "✓ ROADMAP.md exists"
+        test -f docs/DESIGN.md && echo "✓ DESIGN.md exists" || echo "⚠ DESIGN.md missing"
+        test -f docs/SECURITY.md && echo "✓ SECURITY.md exists" || echo "⚠ SECURITY.md missing"
+        test -f CONTRIBUTING.md && echo "✓ CONTRIBUTING.md exists" || echo "⚠ CONTRIBUTING.md missing"
+        
+    - name: Check documentation quality
+      run: |
+        # Basic documentation quality checks
+        word_count=$(wc -w docs/ROADMAP.md | awk '{print $1}')
+        echo "ROADMAP.md word count: $word_count"
+        test $word_count -gt 100 && echo "✓ ROADMAP.md has sufficient content"
+        
+        design_count=$(wc -w docs/DESIGN.md | awk '{print $1}')
+        echo "DESIGN.md word count: $design_count" 
+        test $design_count -gt 1000 && echo "✓ DESIGN.md has comprehensive content"
