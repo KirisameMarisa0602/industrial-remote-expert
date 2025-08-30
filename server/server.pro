@@ -7,3 +7,4 @@ SOURCES += src/main.cpp \
            src/roomhub.cpp
 HEADERS += src/roomhub.h
 include(../common/common.pri)
+

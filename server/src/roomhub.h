@@ -14,6 +14,8 @@ struct ClientCtx {
     QString user;       // 用户名，仅用于日志/展示
     QString roomId;     // 当前加入的房间；空字符串表示未加入任何房间
     QString sessionToken; // 登录会话令牌
+    QString userRole;   // 用户角色 (expert/factory)
+    int userId = -1;    // 用户ID
     bool authenticated = false; // 是否已认证
 };
 
@@ -46,10 +48,18 @@ private:
     
     // 用户认证相关方法
     bool initDatabase();
-    bool registerUser(const QString& username, const QString& password);
+    bool registerUser(const QString& username, const QString& password, const QString& role);
     QString loginUser(const QString& username, const QString& password);
     bool validateSessionToken(const QString& token);
     QString generateSessionToken();
+    QString generateSalt();
+    QString hashPassword(const QString& password, const QString& salt);
     void handleRegister(ClientCtx* c, const Packet& p);
     void handleLogin(ClientCtx* c, const Packet& p);
+    
+    // 工单相关方法
+    void handleWorkOrderCreate(ClientCtx* c, const Packet& p);
+    void handleWorkOrderList(ClientCtx* c, const Packet& p);
+    void handleWorkOrderUpdate(ClientCtx* c, const Packet& p);
+    void handleWorkOrderDelete(ClientCtx* c, const Packet& p);
 };

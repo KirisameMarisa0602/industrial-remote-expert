@@ -43,9 +43,13 @@ enum MsgType : quint16 {
     MSG_REGISTER         = 1,   // User registration
     MSG_LOGIN            = 2,   // User login
     MSG_LOGOUT           = 3,   // User logout
+    // Work order management (4-9)
     MSG_CREATE_WORKORDER = 4,   // Create work order
-    MSG_JOIN_WORKORDER   = 4,   // Join work order (room) - KEEPING OLD VALUE FOR COMPATIBILITY
+    MSG_JOIN_WORKORDER   = 5,   // Join work order (room) - UPDATED VALUE
     MSG_LEAVE_WORKORDER  = 6,   // Leave work order (room)
+    MSG_LIST_WORKORDERS  = 7,   // List work orders
+    MSG_UPDATE_WORKORDER = 8,   // Update work order
+    MSG_DELETE_WORKORDER = 9,   // Delete work order
 
     // Communication (10-19) - keeping old numbers for compatibility
     MSG_TEXT             = 10,  // Text message - KEEPING OLD VALUE FOR COMPATIBILITY

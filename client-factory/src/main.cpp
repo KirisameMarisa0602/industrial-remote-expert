@@ -1,11 +1,16 @@
 #include <QtWidgets>
-#include "mainwindow.h"
+#include "loginwindow.h"
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    MainWindow w;
-    w.resize(720, 480);
+    
+    // Set application properties
+    app.setApplicationName("Industrial Remote Expert");
+    app.setApplicationVersion("2.0");
+    app.setOrganizationName("Industrial Remote Expert");
+    
+    LoginWindow w;
     w.show();
-    w.startCamera();
+    
     return app.exec();
 }
