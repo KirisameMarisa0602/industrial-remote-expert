@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include "loginregisterdialog.h"
+#include "modernstyle.h"
 #include <QCameraInfo>
 #include <QBuffer>
 #include <QCameraViewfinderSettings>
@@ -17,6 +19,15 @@
 #include <QPixmap>
 #include <QCheckBox>
 #include <QMessageBox>
+#include <QListWidget>
+#include <QDockWidget>
+#include <QSplitter>
+#include <QGridLayout>
+#include <QTreeWidget>
+#include <QMenuBar>
+#include <QStatusBar>
+#include <QTabWidget>
+#include <QGroupBox>
 
 // 假设这些宏和类在其他地方定义
 // #define MSG_JOIN_WORKORDER 100
@@ -27,119 +38,283 @@
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
+    , currentUserRole_(UserRole::None)
     , camera_(nullptr)
     , probe_(nullptr)
-    , settings_("irexp", "client-expert") // 使用指定的组织和应用名
+    , settings_("irexp", "client-expert")
     , isConnected_(false)
     , isJoinedRoom_(false)
     , isAuthenticated_(false)
 {
-    QWidget *w  = new QWidget(this);
-    QVBoxLayout *lay = new QVBoxLayout(w);
+    // Apply modern dark theme
+    setStyleSheet(ModernStyle::getDarkThemeStyleSheet());
+    
+    // Set window properties
+    setWindowTitle("技术专家客户端 - Industrial Remote Expert");
+    setMinimumSize(1200, 800);
+    resize(1400, 900);
+    
+    // Create menu bar
+    createMenuBar();
+    
+    // Create status bar
+    statusBar()->showMessage("未连接到服务器");
+    
+    // Show login dialog first
+    showLoginDialog();
+}
 
-    /* 连接行 */
-    QHBoxLayout *row1 = new QHBoxLayout;
+void MainWindow::showLoginDialog()
+{
+    LoginRegisterDialog* loginDialog = new LoginRegisterDialog(this);
+    
+    connect(loginDialog, &LoginRegisterDialog::loginRequested, 
+            this, &MainWindow::onLoginSuccess);
+    connect(loginDialog, &LoginRegisterDialog::registerRequested, 
+            this, &MainWindow::onRegisterSuccess);
+    
+    if (loginDialog->exec() == QDialog::Accepted) {
+        currentUserRole_ = loginDialog->getSelectedRole();
+        authenticatedUsername_ = loginDialog->getUsername();
+        
+        if (currentUserRole_ == UserRole::Expert) {
+            setupExpertMainUI();
+            statusBar()->showMessage(QString("已登录用户: %1 (技术专家)").arg(authenticatedUsername_));
+        } else {
+            QMessageBox::warning(this, "角色错误", "技术专家客户端只能使用技术专家身份登录！");
+            QApplication::quit();
+        }
+    } else {
+        QApplication::quit();
+    }
+    
+    loginDialog->deleteLater();
+}
+
+void MainWindow::setupExpertMainUI()
+{
+    // Create central widget with video grid
+    createVideoGrid();
+    
+    // Create dockable panels
+    createNavigationPanel();
+    createParticipantPanel(); 
+    createChatPanel();
+    
+    // Set up connections
+    connect(&conn_, &ClientConn::packetArrived, this, &MainWindow::onPkt);
+    connect(&conn_, &ClientConn::connected, this, &MainWindow::onConnected);
+    connect(&conn_, &ClientConn::disconnected, this, &MainWindow::onDisconnected);
+}
+
+void MainWindow::createMenuBar()
+{
+    auto* fileMenu = menuBar()->addMenu("文件(&F)");
+    fileMenu->addAction("连接服务器(&C)", this, &MainWindow::onConnect, QKeySequence("Ctrl+C"));
+    fileMenu->addSeparator();
+    fileMenu->addAction("退出(&X)", this, &QWidget::close, QKeySequence("Ctrl+Q"));
+    
+    auto* workOrderMenu = menuBar()->addMenu("工单(&W)");
+    workOrderMenu->addAction("加入工单(&J)", this, &MainWindow::onJoin, QKeySequence("Ctrl+J"));
+    workOrderMenu->addAction("离开工单(&L)", [this]() {
+        // TODO: Implement leave work order
+    });
+    
+    auto* videoMenu = menuBar()->addMenu("视频(&V)");
+    videoMenu->addAction("开启/关闭摄像头(&T)", this, &MainWindow::onToggleCamera, QKeySequence("Ctrl+T"));
+    
+    auto* helpMenu = menuBar()->addMenu("帮助(&H)");
+    helpMenu->addAction("关于(&A)", [this]() {
+        QMessageBox::about(this, "关于", "Industrial Remote Expert\n技术专家客户端 v1.0");
+    });
+}
+
+void MainWindow::createNavigationPanel()
+{
+    navigationDock_ = new QDockWidget("导航", this);
+    navigationDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    
+    auto* navWidget = new QWidget();
+    auto* navLayout = new QVBoxLayout(navWidget);
+    
+    // Connection controls
+    auto* connectionGroup = new QGroupBox("服务器连接");
+    auto* connLayout = new QFormLayout(connectionGroup);
+    
     edHost = new QLineEdit("127.0.0.1");
     edPort = new QLineEdit("9000");
     edPort->setMaximumWidth(80);
-    QPushButton *btnConn = new QPushButton("连接");
-    row1->addWidget(new QLabel("Host:")); row1->addWidget(edHost);
-    row1->addWidget(new QLabel("Port:")); row1->addWidget(edPort);
-    row1->addWidget(btnConn);
-    lay->addLayout(row1);
-
-    /* 登录/注册行 */
-    QHBoxLayout *loginRow = new QHBoxLayout;
-    edLoginUser = new QLineEdit();
-    edLoginUser->setPlaceholderText("Username");
-    edLoginPass = new QLineEdit();
-    edLoginPass->setPlaceholderText("Password");
-    edLoginPass->setEchoMode(QLineEdit::Password);
-    btnLogin = new QPushButton("Login");
-    btnRegister = new QPushButton("Register");
-    btnLogin->setEnabled(false);     // 连接后才能使用
-    btnRegister->setEnabled(false);  // 连接后才能使用
-    loginRow->addWidget(new QLabel("User:")); loginRow->addWidget(edLoginUser);
-    loginRow->addWidget(new QLabel("Pass:")); loginRow->addWidget(edLoginPass);
-    loginRow->addWidget(btnLogin);
-    loginRow->addWidget(btnRegister);
-    lay->addLayout(loginRow);
-
-    /* 加入房间行 */
-    QHBoxLayout *row2 = new QHBoxLayout;
-    edUser = new QLineEdit("client-A");
+    auto* btnConn = new QPushButton("连接");
+    
+    connLayout->addRow("主机:", edHost);
+    connLayout->addRow("端口:", edPort);
+    connLayout->addRow("", btnConn);
+    navLayout->addWidget(connectionGroup);
+    
+    // Work orders
+    auto* workOrderGroup = new QGroupBox("工单列表");
+    auto* woLayout = new QVBoxLayout(workOrderGroup);
+    
+    workOrderList_ = new QTreeWidget();
+    workOrderList_->setHeaderLabels({"工单", "状态", "创建时间"});
+    woLayout->addWidget(workOrderList_);
+    
+    auto* joinLayout = new QHBoxLayout();
     edRoom = new QLineEdit("R123");
-    btnJoin_ = new QPushButton("加入工单");
-    btnJoin_->setEnabled(false);  // 认证后才能使用
-    row2->addWidget(new QLabel("User:"));  row2->addWidget(edUser);
-    row2->addWidget(new QLabel("Room:"));  row2->addWidget(edRoom);
-    row2->addWidget(btnJoin_);
-    lay->addLayout(row2);
-
-    /* 日志 */
-    txtLog = new QTextEdit; txtLog->setReadOnly(true);
-    lay->addWidget(txtLog);
-
-    /* 视频区 - 本地和远端视频并排显示 */
-    QHBoxLayout *videoRow = new QHBoxLayout;
+    edRoom->setPlaceholderText("输入工单号");
+    edUser = new QLineEdit(authenticatedUsername_);
+    edUser->setVisible(false); // Hidden in modern UI, using authenticated username
+    joinButton_ = new QPushButton("加入工单");
+    joinButton_->setEnabled(false);
     
-    // 本地视频预览 (左侧)
-    QVBoxLayout *localVideoLayout = new QVBoxLayout;
-    videoLabel_ = new QLabel("本地视频预览");
-    videoLabel_->setFixedSize(320, 240);
-    videoLabel_->setStyleSheet("border:1px solid black;");
-    videoLabel_->setAlignment(Qt::AlignCenter);
-    videoLabel_->setScaledContents(true);
-    QLabel *localLabel = new QLabel("Local Preview");
-    localLabel->setAlignment(Qt::AlignCenter);
-    localVideoLayout->addWidget(localLabel);
-    localVideoLayout->addWidget(videoLabel_);
+    joinLayout->addWidget(edRoom);
+    joinLayout->addWidget(joinButton_);
+    woLayout->addLayout(joinLayout);
     
-    // 远端视频显示 (右侧)
-    QVBoxLayout *remoteVideoLayout = new QVBoxLayout;
-    remoteLabel_ = new QLabel("远端视频");
-    remoteLabel_->setFixedSize(320, 240);
-    remoteLabel_->setStyleSheet("border:1px solid blue;");
-    remoteLabel_->setAlignment(Qt::AlignCenter);
-    remoteLabel_->setScaledContents(true);
-    QLabel *remoteHeaderLabel = new QLabel("Remote Video");
-    remoteHeaderLabel->setAlignment(Qt::AlignCenter);
-    remoteVideoLayout->addWidget(remoteHeaderLabel);
-    remoteVideoLayout->addWidget(remoteLabel_);
+    navLayout->addWidget(workOrderGroup);
     
-    videoRow->addLayout(localVideoLayout);
-    videoRow->addLayout(remoteVideoLayout);
-    lay->addLayout(videoRow);
+    // Device data section
+    auto* deviceGroup = new QGroupBox("设备数据");
+    auto* deviceLayout = new QVBoxLayout(deviceGroup);
+    
+    auto* deviceList = new QListWidget();
+    deviceList->addItem("温度传感器 - 正常");
+    deviceList->addItem("压力传感器 - 正常");  
+    deviceList->addItem("流量计 - 警告");
+    deviceLayout->addWidget(deviceList);
+    
+    navLayout->addWidget(deviceGroup);
+    
+    navLayout->addStretch();
+    
+    navigationDock_->setWidget(navWidget);
+    addDockWidget(Qt::LeftDockWidgetArea, navigationDock_);
+    
+    // Connect signals
+    connect(btnConn, &QPushButton::clicked, this, &MainWindow::onConnect);
+    connect(joinButton_, &QPushButton::clicked, this, &MainWindow::onJoin);
+}
 
-    /* 摄像头开关 */
+void MainWindow::createVideoGrid()
+{
+    videoGrid_ = new QWidget();
+    auto* gridLayout = new QGridLayout(videoGrid_);
+    
+    // Create video display areas for up to 6 participants
+    for (int i = 0; i < 6; ++i) {
+        auto* videoFrame = new QLabel();
+        videoFrame->setMinimumSize(320, 240);
+        videoFrame->setStyleSheet(R"(
+            QLabel {
+                border: 2px solid #555555;
+                border-radius: 8px;
+                background-color: #404040;
+                color: #ffffff;
+            }
+        )");
+        videoFrame->setAlignment(Qt::AlignCenter);
+        videoFrame->setText(i == 0 ? "本地视频\n(未开启)" : QString("参与者 %1\n(未连接)").arg(i));
+        videoFrame->setScaledContents(true);
+        
+        gridLayout->addWidget(videoFrame, i / 3, i % 3);
+        
+        if (i == 0) {
+            videoLabel_ = videoFrame; // Keep reference to local video
+        } else if (i == 1) {
+            remoteLabel_ = videoFrame; // Keep reference for compatibility
+        }
+    }
+    
+    setCentralWidget(videoGrid_);
+}
+
+void MainWindow::createParticipantPanel()
+{
+    participantDock_ = new QDockWidget("参与者", this);
+    participantDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    
+    auto* participantWidget = new QWidget();
+    auto* participantLayout = new QVBoxLayout(participantWidget);
+    
+    auto* participantLabel = new QLabel("在线参与者:");
+    participantLabel->setProperty("class", "heading");
+    participantLayout->addWidget(participantLabel);
+    
+    participantList_ = new QListWidget();
+    participantList_->addItem("🎥 " + authenticatedUsername_ + " (你)");
+    participantLayout->addWidget(participantList_);
+    
+    // Control buttons
+    auto* controlGroup = new QGroupBox("控制");
+    auto* controlLayout = new QVBoxLayout(controlGroup);
+    
     btnCamera_ = new QPushButton("开启摄像头");
-    lay->addWidget(btnCamera_);
+    auto* btnMute = new QPushButton("静音");
+    auto* btnRecord = new QPushButton("开始录制");
     
-    /* 自动启动摄像头选项 */
-    chkAutoStart_ = new QCheckBox("Auto start camera after join");
-    chkAutoStart_->setChecked(loadAutoStartPreference()); // 加载保存的偏好
-    lay->addWidget(chkAutoStart_);
-
-    /* 发送文本 */
-    QHBoxLayout *row3 = new QHBoxLayout;
-    edInput = new QLineEdit;
-    QPushButton *btnSend = new QPushButton("发送文本");
-    row3->addWidget(edInput); row3->addWidget(btnSend);
-    lay->addLayout(row3);
-
-    setCentralWidget(w);
-    setWindowTitle("Client (含视频)");
-
-    connect(btnConn,   &QPushButton::clicked, this, &MainWindow::onConnect);
-    connect(btnLogin,  &QPushButton::clicked, this, &MainWindow::onLogin);
-    connect(btnRegister, &QPushButton::clicked, this, &MainWindow::onRegister);
-    connect(btnJoin_,   &QPushButton::clicked, this, &MainWindow::onJoin);
-    connect(btnSend,   &QPushButton::clicked, this, &MainWindow::onSendText);
-    connect(btnCamera_,&QPushButton::clicked,this,&MainWindow::onToggleCamera);
+    controlLayout->addWidget(btnCamera_);
+    controlLayout->addWidget(btnMute);
+    controlLayout->addWidget(btnRecord);
+    
+    chkAutoStart_ = new QCheckBox("自动开启摄像头");
+    chkAutoStart_->setChecked(loadAutoStartPreference());
+    controlLayout->addWidget(chkAutoStart_);
+    
+    participantLayout->addWidget(controlGroup);
+    participantLayout->addStretch();
+    
+    participantDock_->setWidget(participantWidget);
+    addDockWidget(Qt::RightDockWidgetArea, participantDock_);
+    
+    // Connect signals
+    connect(btnCamera_, &QPushButton::clicked, this, &MainWindow::onToggleCamera);
     connect(chkAutoStart_, &QCheckBox::toggled, this, &MainWindow::onAutoStartToggled);
-    connect(&conn_,    &ClientConn::packetArrived, this, &MainWindow::onPkt);
-    connect(&conn_,    &ClientConn::connected, this, &MainWindow::onConnected);
-    connect(&conn_,    &ClientConn::disconnected, this, &MainWindow::onDisconnected);
+}
+
+void MainWindow::createChatPanel()
+{
+    chatDock_ = new QDockWidget("聊天", this);
+    chatDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    
+    auto* chatWidget = new QWidget();
+    auto* chatLayout = new QVBoxLayout(chatWidget);
+    
+    // Chat tabs for different conversations
+    chatTabs_ = new QTabWidget();
+    
+    // Main chat tab
+    auto* mainChatTab = new QWidget();
+    auto* mainChatLayout = new QVBoxLayout(mainChatTab);
+    
+    chatDisplay_ = new QTextEdit();
+    chatDisplay_->setReadOnly(true);
+    chatDisplay_->append("系统: 欢迎使用技术专家客户端");
+    txtLog = chatDisplay_; // Keep reference for compatibility
+    
+    chatInput_ = new QLineEdit();
+    chatInput_->setPlaceholderText("输入消息...");
+    edInput = chatInput_; // Keep reference for compatibility
+    
+    auto* sendButton = new QPushButton("发送");
+    auto* inputLayout = new QHBoxLayout();
+    inputLayout->addWidget(chatInput_);
+    inputLayout->addWidget(sendButton);
+    
+    mainChatLayout->addWidget(chatDisplay_);
+    mainChatLayout->addLayout(inputLayout);
+    
+    chatTabs_->addTab(mainChatTab, "主聊天");
+    chatLayout->addWidget(chatTabs_);
+    
+    chatDock_->setWidget(chatWidget);
+    addDockWidget(Qt::BottomDockWidgetArea, chatDock_);
+    
+    // Connect signals
+    connect(sendButton, &QPushButton::clicked, this, &MainWindow::onSendText);
+    connect(chatInput_, &QLineEdit::returnPressed, this, &MainWindow::onSendText);
+    
+    // Auto-start camera if enabled
+    tryAutoStartCamera();
 }
 
 /* ---------- 网络 ---------- */
@@ -150,18 +325,22 @@ void MainWindow::onConnect()
 }
 void MainWindow::onJoin()
 {
-    QJsonObject j{{"roomId", edRoom->text()}, {"user", edUser->text()}};
+    QJsonObject j{{"roomId", edRoom->text()}, {"user", authenticatedUsername_}};
     conn_.send(MSG_JOIN_WORKORDER, j);
-    currentRoom_ = edRoom->text(); // 记录尝试加入的房间
+    currentRoom_ = edRoom->text();
+    chatDisplay_->append(QString("正在加入工单: %1").arg(edRoom->text()));
 }
+
 void MainWindow::onSendText()
 {
-    QJsonObject j{{"roomId",  edRoom->text()},
-                  {"sender",  edUser->text()},
+    if (edInput->text().trimmed().isEmpty()) return;
+    
+    QJsonObject j{{"roomId",  currentRoom_},
+                  {"sender",  authenticatedUsername_},
                   {"content", edInput->text()},
                   {"ts",      QDateTime::currentMSecsSinceEpoch()}};
-    txtLog->append(QString("[%1] %2: %3")
-                   .arg(edRoom->text(), edUser->text(), edInput->text()));
+    
+    chatDisplay_->append(QString("[我] %1").arg(edInput->text()));
     conn_.send(MSG_TEXT, j);
     edInput->clear();
 }
@@ -170,18 +349,23 @@ void MainWindow::onPkt(Packet p)
     switch (p.type)
     {
     case MSG_TEXT:
-        txtLog->append(QString("[%1] %2: %3")
-                       .arg(p.json["roomId"].toString(),
-                            p.json["sender"].toString(),
-                            p.json["content"].toString()));
+    {
+        QString sender = p.json["sender"].toString();
+        QString content = p.json["content"].toString();
+        QString roomId = p.json["roomId"].toString();
+        
+        if (roomId == currentRoom_ && sender != authenticatedUsername_) {
+            chatDisplay_->append(QString("[%1] %2").arg(sender, content));
+        }
         break;
+    }
     case MSG_VIDEO_FRAME:
     {
         QString sender = p.json["sender"].toString();
         QString roomId = p.json["roomId"].toString();
         
-        // 只显示来自其他用户且在当前房间的视频
-        if (sender != edUser->text() && roomId == currentRoom_ && isJoinedRoom_) {
+        // Only show video from other users in current room
+        if (sender != authenticatedUsername_ && roomId == currentRoom_ && isJoinedRoom_) {
             QPixmap pix; 
             pix.loadFromData(p.bin);
             if (!pix.isNull()) {
@@ -192,40 +376,47 @@ void MainWindow::onPkt(Packet p)
     }
     case MSG_SERVER_EVENT:
     {
-        txtLog->append(QString("[server] %1")
+        chatDisplay_->append(QString("[服务器] %1")
                        .arg(QString::fromUtf8(QJsonDocument(p.json).toJson())));
         
         int code = p.json.value("code").toInt();
         QString message = p.json.value("message").toString();
-        
-        // 处理登录成功响应
+        // Handle authentication responses
         if (code == 0 && message == "login successful") {
             isAuthenticated_ = true;
             sessionToken_ = p.json.value("token").toString();
-            btnJoin_->setEnabled(true);  // 启用房间加入按钮
+            joinButton_->setEnabled(true);
             
-            txtLog->append("Login successful! You can now join rooms.");
+            chatDisplay_->append("✅ 登录成功！可以加入工单了。");
+            statusBar()->showMessage(QString("已认证用户: %1").arg(authenticatedUsername_));
         }
-        // 处理注册成功响应
+        // Handle registration success
         else if (code == 0 && message == "registration successful") {
-            txtLog->append("Registration successful! You can now login.");
+            chatDisplay_->append("✅ 注册成功！请重新登录。");
         }
-        // 处理房间加入成功的响应
+        // Handle room join success
         else if (code == 0 && message == "joined") {
             isJoinedRoom_ = true;
-            txtLog->append(QString("成功加入房间: %1").arg(currentRoom_));
+            chatDisplay_->append(QString("✅ 成功加入工单: %1").arg(currentRoom_));
+            statusBar()->showMessage(QString("已加入工单: %1").arg(currentRoom_));
             
-            // 尝试自动启动摄像头
+            // Update participant list
+            participantList_->clear();
+            participantList_->addItem("🎥 " + authenticatedUsername_ + " (你)");
+            
+            // Try auto-start camera
             tryAutoStartCamera();
         }
-        // 处理错误响应
+        // Handle error responses
         else if (code != 0) {
             if (message.contains("authentication required")) {
-                txtLog->append("Error: Please login first before joining a room.");
+                chatDisplay_->append("❌ 错误: 请先登录再加入工单");
             } else if (message.contains("invalid username or password")) {
-                txtLog->append("Error: Invalid username or password.");
+                chatDisplay_->append("❌ 错误: 用户名或密码错误");
             } else if (message.contains("username already exists")) {
-                txtLog->append("Error: Username already exists. Try a different name.");
+                chatDisplay_->append("❌ 错误: 用户名已存在，请尝试其他用户名");
+            } else {
+                chatDisplay_->append(QString("❌ 错误: %1").arg(message));
             }
         }
         break;
@@ -421,8 +612,8 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
         return; // 不发送帧数据
     }
 
-    QJsonObject j{{"roomId", edRoom->text()},
-                  {"sender", edUser->text()},
+    QJsonObject j{{"roomId", currentRoom_},
+                  {"sender", authenticatedUsername_},
                   {"ts",     QDateTime::currentMSecsSinceEpoch()}};
     conn_.send(MSG_VIDEO_FRAME, j, jpeg);
 }
@@ -431,9 +622,15 @@ void MainWindow::onVideoFrame(const QVideoFrame &frame)
 void MainWindow::onConnected()
 {
     isConnected_ = true;
-    btnLogin->setEnabled(true);
-    btnRegister->setEnabled(true);
-    txtLog->append("已连接到服务器");
+    joinButton_->setEnabled(true);
+    statusBar()->showMessage(QString("已连接到服务器 - 用户: %1").arg(authenticatedUsername_));
+    chatDisplay_->append("✅ 已连接到服务器");
+    
+    // If we have stored credentials from login dialog, send them now
+    if (!authenticatedUsername_.isEmpty() && currentUserRole_ != UserRole::None) {
+        // Auto-authenticate with stored credentials
+        // This would be triggered from the login dialog after successful connection
+    }
 }
 
 void MainWindow::onDisconnected()
@@ -444,12 +641,9 @@ void MainWindow::onDisconnected()
     currentRoom_.clear();
     sessionToken_.clear();
     
-    // 禁用需要连接的按钮
-    btnLogin->setEnabled(false);
-    btnRegister->setEnabled(false);
-    btnJoin_->setEnabled(false);
-    
-    txtLog->append("与服务器断开连接");
+    joinButton_->setEnabled(false);
+    statusBar()->showMessage("与服务器断开连接");
+    chatDisplay_->append("❌ 与服务器断开连接");
 }
 
 /* ---------- 自动启动功能 ---------- */
@@ -495,37 +689,46 @@ bool MainWindow::loadAutoStartPreference()
 }
 
 /* ---------- 登录/注册功能 ---------- */
-void MainWindow::onLogin()
+void MainWindow::onLoginSuccess(const QString& username, const QString& password, UserRole role)
 {
-    QString username = edLoginUser->text().trimmed();
-    QString password = edLoginPass->text();
-    
-    if (username.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(this, "Login Error", "Please enter both username and password");
+    if (!isConnected_) {
+        // Auto-connect to server first
+        conn_.connectTo("127.0.0.1", 9000);
+        // Store credentials to send after connection
+        authenticatedUsername_ = username;
+        currentUserRole_ = role;
         return;
     }
     
-    QJsonObject loginData{{"username", username}, {"password", password}};
+    QString roleStr = (role == UserRole::Expert) ? "expert" : "factory";
+    QJsonObject loginData{
+        {"username", username}, 
+        {"password", password},
+        {"role", roleStr}
+    };
+    
     conn_.send(MSG_LOGIN, loginData);
-    txtLog->append(QString("Attempting to login as: %1").arg(username));
+    chatDisplay_->append(QString("正在登录: %1 (%2)").arg(username).arg(roleStr == "expert" ? "技术专家" : "工厂用户"));
 }
 
-void MainWindow::onRegister()
+void MainWindow::onRegisterSuccess(const QString& username, const QString& password, UserRole role)
 {
-    QString username = edLoginUser->text().trimmed();
-    QString password = edLoginPass->text();
-    
-    if (username.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(this, "Registration Error", "Please enter both username and password");
+    if (!isConnected_) {
+        // Auto-connect to server first
+        conn_.connectTo("127.0.0.1", 9000);
+        // Store credentials to send after connection
+        authenticatedUsername_ = username;
+        currentUserRole_ = role;
         return;
     }
     
-    if (password.length() < 4) {
-        QMessageBox::warning(this, "Registration Error", "Password must be at least 4 characters long");
-        return;
-    }
+    QString roleStr = (role == UserRole::Expert) ? "expert" : "factory";
+    QJsonObject registerData{
+        {"username", username}, 
+        {"password", password},
+        {"role", roleStr}
+    };
     
-    QJsonObject registerData{{"username", username}, {"password", password}};
     conn_.send(MSG_REGISTER, registerData);
-    txtLog->append(QString("Attempting to register user: %1").arg(username));
+    chatDisplay_->append(QString("正在注册: %1 (%2)").arg(username).arg(roleStr == "expert" ? "技术专家" : "工厂用户"));
 }
