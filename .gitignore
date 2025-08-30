@@ -1,0 +1,52 @@
+# Qt / C++ / CMake
+build*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.app
+moc_*
+ui_*
+qrc_*
+*.pro.user
+*.user
+*.qbs.user
+*.qmlc
+*.jsc
+
+# Qt Creator per-build dirs
+build-*-Desktop_Qt_*_GCC_*bit-Debug/
+build-*-Desktop_Qt_*_GCC_*bit-Release/
+build-*/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Logs & temp
+*.log
+*.tmp
+*.cache
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+secrets.json
